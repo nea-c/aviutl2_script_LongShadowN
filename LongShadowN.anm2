@@ -28,8 +28,8 @@
 
 
 --group:Fade,false
---track@fade_in:Fade In,0,1,1,0.01
---track@fade_out:Fade Out,0,1,0.5,0.01
+--track@fade_in:Fade In,0,100,100,0.01
+--track@fade_out:Fade Out,0,100,50,0.01
 --group
 
 --group:Shadow Color,false
@@ -658,16 +658,19 @@ float4 color_object(float4 source) {
     return float4(rgb * alpha, alpha);
 }
 float4 neutralize_shadow(float4 shadow, float4 source) {
-    // Keep the shadow coverage under antialiased source pixels. Removing it
-    // exposes the partially transparent source over the background as a dark
-    // fringe. Instead, only replace its premultiplied color with the source's
-    // straight color across the source texture's one-byte AA support.
-    float edge_weight = saturate(source.a * 255);
-    if (edge_weight <= 0 || shadow.a <= 1e-6) return shadow;
-    float3 source_rgb = source.rgb / max(source.a, 1e-6);
-    float3 shadow_rgb = float3(shadow.r, shadow.g, shadow.b);
-    float3 rgb = lerp(shadow_rgb, source_rgb * shadow.a, edge_weight);
-    return float4(rgb, shadow.a);
+    float source_support = saturate(source.a * 255);
+    if (source_support <= 0) return shadow;
+    // Reinforce antialiased source edges with an object-colored backing. Its
+    // opacity follows Object Color only, so Shadow::Opacity cannot darken the
+    // source edge and Object::Opacity can still hide it completely.
+    float object_alpha = source.a * object_opacity;
+    float reinforced_alpha = object_opacity;
+    float backing_alpha = saturate((reinforced_alpha - object_alpha)
+        / max(1 - object_alpha, 1e-6));
+    float3 straight_rgb = source.rgb / max(source.a, 1e-6);
+    float3 rgb = lerp(straight_rgb, object_rgb, object_mix);
+    float4 backing = float4(rgb * backing_alpha, backing_alpha);
+    return lerp(shadow, backing, source_support);
 }
 float4 composite_shadow(float4 pos : SV_Position) : SV_Target {
     float4 shadow = shadow_texture[int2(pos.xy)];
@@ -1027,14 +1030,14 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
         { source_w, source_h, work_scale }, "copy", "clamp")
     obj.clearbuffer("cache:longshadown_resolved", buffer_w, buffer_h)
     obj.pixelshader("resolve_shadow", "cache:longshadown_resolved", "cache:longshadown_shadow_a",
-        { buffer_w, buffer_h, fade_in, fade_out, work_scale }, "copy", "clamp")
+        { buffer_w, buffer_h, fade_in / 100, fade_out / 100, work_scale }, "copy", "clamp")
     obj.clearbuffer("cache:longshadown_shadow_b", buffer_w, buffer_h)
     obj.pixelshader("edge_antialias", "cache:longshadown_shadow_b",
         { "cache:longshadown_resolved", "cache:longshadown_source" },
         { buffer_w, buffer_h, source_offset_x, source_offset_y, source_w, source_h,
           source_pos_x, source_pos_y, math.cos(math.rad(angle)), math.sin(math.rad(angle)),
           shadow_length, target_scale, shadow_type, refine_sample_count, refine_samples,
-          fade_in, fade_out, effective_quality >= 2 and 1 or 0 }, "copy", "clamp")
+          fade_in / 100, fade_out / 100, effective_quality >= 2 and 1 or 0 }, "copy", "clamp")
     obj.copybuffer("cache:longshadown_resolved", "cache:longshadown_shadow_b")
     obj.clearbuffer("cache:longshadown_final", buffer_w, buffer_h)
     -- Clamp preserves the 1D endpoints; wrapped UVs and the loop sampler give
