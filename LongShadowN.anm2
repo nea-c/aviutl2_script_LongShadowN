@@ -27,12 +27,12 @@
 --hide@radial_length:shadow_type<1
 
 
---group:Fade,false
+--group:Fade
 --track@fade_in:Fade In,0,100,100,0.01
 --track@fade_out:Fade Out,0,100,50,0.01
 --group
 
---group:Shadow Color,false
+--group:Shadow Color
 --color@shadow_color:Shadow::Color,0x000000
 --track@shadow_mix:Shadow::Mix,0,100,50,0.01
 --track@shadow_opacity:Shadow::Opacity,0,100,100,0.01
