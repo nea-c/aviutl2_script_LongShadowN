@@ -8,9 +8,12 @@
 
 ## 最新 / Latest
 
-r2
+r3
 
 ## 変更履歴 / Change log
+
+- r3
+  - 一部グループの初期状態をOpenに変更
 
 - r2
   - `Object Color` の `Mix / Opacity` が反映されない問題を修正
