@@ -1,0 +1,1124 @@
+--require:2011000
+--label:加工
+--information:LongShadowN r1
+
+--select@shadow_type:ShadowType=0,Directional=0,Radial=1,Inverse Radial=2
+--select@quality:Quality=1,Draft=0,Standard=1,High=2,Ultra=3
+--select@output_quality:Output Quality=2,Draft=0,Standard=1,High=2,Ultra=3
+
+--separator:Shadow
+--track@angle:Direction,-3600,3600,45,0.1
+--track@directional_length:Directional::Length,0,4000,200,0.1
+--hide@angle:shadow_type>0
+--hide@directional_length:shadow_type>0
+
+--select@source_type:Source Type=0,Anchor=0,Layer=1
+--track@source_x:X,-100000,100000,0,0.1
+--track@source_y:Y,-100000,100000,0,0.1
+--track@source_layer:Layer,1,1000,1,1
+--track@radial_length:Radial::Length,0,4000,200,0.1
+--hide@source_type:shadow_type<1
+--hide@source_x:shadow_type<1
+--hide@source_x:source_type==1
+--hide@source_y:shadow_type<1
+--hide@source_y:source_type==1
+--hide@source_layer:shadow_type<1
+--hide@source_layer:source_type==0
+--hide@radial_length:shadow_type<1
+
+
+--group:Fade,false
+--track@fade_in:Fade In,0,1,1,0.01
+--track@fade_out:Fade Out,0,1,0.5,0.01
+--group
+
+--group:Shadow Color,false
+--color@shadow_color:Shadow::Color,0x000000
+--track@shadow_mix:Shadow::Mix,0,100,50,0.01
+--track@shadow_opacity:Shadow::Opacity,0,100,100,0.01
+--group
+
+--group:Object Color,false
+--color@object_color:Object::Color,0x000000
+--track@object_mix:Object::Mix,0,100,0,0.01
+--track@object_opacity:Object::Opacity,0,100,100,0.01
+--group
+
+--group:Texture,false
+--select@texture_type:Texture::Type=0,None=0,1D=1,2D=2
+--track@texture_layer:Texture::Layer,1,1000,1,1
+--track@texture_x:Texture::Offset X,-100000,100000,0,0.01
+--track@texture_y:Texture::Offset Y,-100000,100000,0,0.01
+--select@texture_mapping:Texture::Mapping=0,Stretch=0,Fit=1,Fill=2,Original=3
+--track@texture_1d_scale:Texture::Scale,1,1000,100,0.001
+--check@texture_2d_scale_link:Link Scale,false
+--track@texture_2d_scale_x:Texture::Scale X,1,1000,100,0.001
+--track@texture_2d_scale_y:Texture::Scale Y,1,1000,100,0.001
+--check@texture_repeat:Texture::Repeat,false
+--track@texture_color_mix:Texture::Mix,0,100,100,0.01
+--track@texture_alpha_mix:Texture::Opacity,0,100,100,1
+--hide@texture_layer:texture_type==0
+--hide@texture_x:texture_type<2
+--hide@texture_y:texture_type<2
+--hide@texture_mapping:texture_type<2
+--hide@texture_1d_scale:texture_type~=1
+--hide@texture_2d_scale_x:texture_type<2
+--hide@texture_2d_scale_y:texture_type<2
+--hide@texture_2d_scale_y:texture_2d_scale_link==1
+--hide@texture_repeat:texture_type==0
+--hide@texture_color_mix:texture_type==0
+--hide@texture_alpha_mix:texture_type==0
+--group
+
+--group:Post-processing,false
+--select@supersampling:Supersampling=0,None=0,2x=1
+--check@post_smooth:Post Smooth,false
+--track@blur_shadow:Blur Shadow,0,100,0,0.1
+--group
+
+--[[pixelshader@seed_shadow:
+Texture2D source_texture : register(t0);
+SamplerState linear_sampler : register(s0);
+cbuffer constant0 : register(b0) {
+    float2 source_offset;
+    float2 source_size;
+    float work_scale;
+};
+float4 seed_shadow(float4 pos : SV_Position) : SV_Target {
+    float2 source_pixel = pos.xy / work_scale - source_offset;
+    if (any(source_pixel < 0) || any(source_pixel >= source_size)) return 0;
+    int2 source_texel = int2(floor(source_pixel));
+    float a = work_scale >= 1.5
+        ? source_texture.SampleLevel(linear_sampler, source_pixel / source_size, 0).a
+        : source_texture[source_texel].a;
+    float2 source_coordinate = a > 0.0001
+        ? float2(0.125, 0.125) + 0.75
+            * (source_texel + float2(0.5, 0.5)) / source_size
+        : float2(0, 0);
+    return float4(source_coordinate.x, 0, source_coordinate.y, a);
+}
+]]
+
+--[[pixelshader@directional_step:
+Texture2D near_texture : register(t0);
+Texture2D far_texture : register(t1);
+cbuffer constant0 : register(b0) {
+    float2 buffer_size;
+    float2 direction;
+    float step_length;
+    float total_length;
+    float interval_weight;
+};
+float4 directional_step(float4 pos : SV_Position) : SV_Target {
+    float4 current = near_texture[int2(pos.xy)];
+    float2 sample_pixel = pos.xy - direction * step_length;
+    float4 shifted = 0;
+    if (all(sample_pixel >= 0) && all(sample_pixel < buffer_size)) {
+        shifted = far_texture[int2(floor(sample_pixel))];
+    }
+    shifted.g *= interval_weight;
+    shifted.a *= interval_weight;
+    // G carries R*A; B carries geometry independently from material alpha.
+    float current_distance = saturate(current.g / max(current.a, 1e-6));
+    float shifted_distance = saturate(shifted.g / max(shifted.a, 1e-6)
+        + step_length / max(total_length, 1e-6));
+    float coverage = current.a + (1 - current.a) * shifted.a;
+    bool current_found = current.r > 0.01 && current.b > 0.01;
+    float source_y = current_found ? current.b : shifted.b;
+    float distance = current_found ? current_distance : shifted_distance;
+    float source_x = current_found ? current.r : shifted.r;
+    distance = source_x > 0.01 && source_y > 0.01 ? distance : 1;
+    return float4(source_x, distance * coverage, source_y, coverage);
+}
+]]
+
+--[[pixelshader@raymarch_shadow:
+Texture2D source_texture : register(t0);
+SamplerState linear_sampler : register(s0);
+cbuffer constant0 : register(b0) {
+    float2 buffer_size;
+    float2 source_offset;
+    float2 source_size;
+    float2 projection_origin;
+    float2 direction;
+    float total_length;
+    float target_scale;
+    float shadow_type;
+    float sample_count;
+    float work_scale;
+};
+float sample_source_alpha_ultra(float2 pixel) {
+    float2 local = pixel - source_offset;
+    if (any(local < 0) || any(local >= source_size)) return 0;
+    return saturate(source_texture.SampleLevel(linear_sampler,
+        local / source_size, 0).a);
+}
+float4 raymarch_shadow(float4 pos : SV_Position) : SV_Target {
+    float2 pixel = pos.xy / work_scale;
+    float active_sample_count = sample_count;
+    if (shadow_type >= 0.5) {
+        float safe_scale = max(target_scale, 1e-6);
+        float radial_speed = length(pixel - projection_origin)
+            * abs(log(safe_scale)) * max(1, 1 / safe_scale);
+        active_sample_count = min(8001,
+            max(active_sample_count, ceil(radial_speed * work_scale) + 1));
+    }
+    float coverage = 0;
+    float first_distance = 1;
+    float2 source_coordinate = 0;
+    bool found_source = false;
+    [loop]
+    for (int sample = 0; sample < 8001; ++sample) {
+        if (sample >= active_sample_count) break;
+        float distance = sample == active_sample_count - 1
+            ? 1 : sample / max(active_sample_count - 1, 1);
+        float2 source_pixel;
+        if (shadow_type < 0.5) {
+            source_pixel = pixel - direction * (distance * total_length);
+        } else {
+            float projection_scale = pow(max(target_scale, 1e-6), distance);
+            source_pixel = projection_origin
+                + (pixel - projection_origin) / projection_scale;
+        }
+        float sample_alpha = sample_source_alpha_ultra(source_pixel);
+        if (sample_alpha > 0.0001 && !found_source) {
+            first_distance = distance;
+            float2 source_local = clamp(floor(source_pixel - source_offset),
+                0, source_size - 1);
+            source_coordinate = 0.125
+                + 0.75 * (source_local + 0.5) / source_size;
+            found_source = true;
+        }
+        coverage += (1 - coverage) * sample_alpha;
+        if (coverage >= 0.9999) break;
+    }
+    return float4(source_coordinate.x, first_distance * coverage,
+        source_coordinate.y, coverage);
+}
+]]
+
+--[[pixelshader@edge_antialias:
+Texture2D shadow_texture : register(t0);
+Texture2D source_texture : register(t1);
+SamplerState linear_sampler : register(s0);
+cbuffer constant0 : register(b0) {
+    float2 buffer_size;
+    float2 source_offset;
+    float2 source_size;
+    float2 projection_origin;
+    float2 direction;
+    float total_length;
+    float target_scale;
+    float shadow_type;
+    float sample_count;
+    float refine_samples;
+    float fade_in;
+    float fade_out;
+    float dense_refine;
+};
+float2 refine_offset(int index) {
+    int pair_index = index >> 1;
+    float2 pair_offset;
+    if (pair_index == 0) pair_offset = float2(0.25, 0.25);
+    else if (pair_index == 1) pair_offset = float2(0.25, -0.25);
+    else if (pair_index == 2) pair_offset = float2(0.375, 0.125);
+    else if (pair_index == 3) pair_offset = float2(0.125, -0.375);
+    else if (pair_index == 4) pair_offset = float2(0.4375, 0.3125);
+    else if (pair_index == 5) pair_offset = float2(0.3125, -0.4375);
+    else if (pair_index == 6) pair_offset = float2(0.1875, 0.0625);
+    else pair_offset = float2(0.0625, -0.1875);
+    return (index & 1) == 0 ? pair_offset : -pair_offset;
+}
+float sample_source_alpha(float2 pixel) {
+    float2 local = pixel - source_offset;
+    if (any(local < 0) || any(local >= source_size)) return 0;
+    return saturate(source_texture.SampleLevel(linear_sampler,
+        local / source_size, 0).a);
+}
+float fade_weight_aa(float distance) {
+    float root = fade_in >= 0.9999 ? 1
+        : smoothstep(0, max(1 - fade_in, 1e-6), distance);
+    float tip = fade_out <= 0.0001 ? 1
+        : smoothstep(0, fade_out, 1 - distance);
+    return root * tip;
+}
+float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
+    float4 center = shadow_texture[int2(pos.xy)];
+    float min_geometry = center.b;
+    float max_geometry = center.b;
+    float center_distance = saturate(center.g / max(center.a, 1e-6));
+    float min_distance = center_distance;
+    float max_distance = center_distance;
+    [unroll]
+    for (int scan_y = -1; scan_y <= 1; ++scan_y) {
+        [unroll]
+        for (int scan_x = -1; scan_x <= 1; ++scan_x) {
+            int2 sample_position = clamp(int2(pos.xy) + int2(scan_x, scan_y),
+                int2(0, 0), int2(buffer_size) - 1);
+            float4 neighbor = shadow_texture[sample_position];
+            float geometry = neighbor.b;
+            min_geometry = min(min_geometry, geometry);
+            max_geometry = max(max_geometry, geometry);
+            if (neighbor.b > 0.0001 && neighbor.a > 0.0001) {
+                float distance = saturate(neighbor.g / neighbor.a);
+                min_distance = min(min_distance, distance);
+                max_distance = max(max_distance, distance);
+            }
+        }
+    }
+    bool geometry_edge = max_geometry - min_geometry > 0.0001;
+    bool fade_edge = dense_refine >= 0.5
+        && (fade_in < 0.9999 || fade_out > 0.0001)
+        && max_distance - min_distance > 0.5 / max(sample_count - 1, 1);
+    if (!geometry_edge && !fade_edge) return center;
+
+    // The fast compositor only locates the boundary. Re-evaluate boundary
+    // subpixels from the original source so intermediate resampling cannot
+    // blur them and partial coverage is never normalized back to opaque.
+    float4 refined = 0;
+    [loop]
+    for (int i = 0; i < 16; ++i) {
+        if (i >= refine_samples) break;
+        float2 pixel = pos.xy + refine_offset(i);
+        float coverage = 0;
+        float first_distance = 1;
+        float first_alpha = 0;
+        bool found_source = false;
+        float active_sample_count = sample_count;
+        if (shadow_type >= 0.5) {
+            float safe_scale = max(target_scale, 1e-6);
+            float radial_speed = length(pixel - projection_origin)
+                * abs(log(safe_scale)) * max(1, 1 / safe_scale);
+            active_sample_count = min(8001,
+                max(active_sample_count, ceil(radial_speed) + 1));
+        }
+        [loop]
+        for (int sample = 0; sample < 8001; ++sample) {
+            if (sample >= active_sample_count) break;
+            float distance = sample == active_sample_count - 1
+                ? 1 : sample / max(active_sample_count - 1, 1);
+            float2 source_pixel;
+            if (shadow_type < 0.5) {
+                source_pixel = pixel
+                    - direction * (distance * total_length);
+            } else {
+                float projection_scale = pow(max(target_scale, 1e-6), distance);
+                source_pixel = projection_origin
+                    + (pixel - projection_origin) / projection_scale;
+            }
+            float sample_alpha = sample_source_alpha(source_pixel);
+            if (sample_alpha > 0.0001 && !found_source) {
+                first_distance = distance;
+                first_alpha = sample_alpha;
+                found_source = true;
+            }
+            coverage += (1 - coverage) * sample_alpha;
+            if (coverage >= 0.9999) break;
+        }
+        float weight = fade_weight_aa(first_distance);
+        float weighted_coverage = coverage * weight;
+        float4 contribution = float4(first_alpha * weight,
+            first_distance * weighted_coverage,
+            found_source ? 1 : 0, weighted_coverage);
+        refined += contribution;
+    }
+    return refined / refine_samples;
+}
+]]
+
+--[[pixelshader@radial_step:
+Texture2D shadow_texture : register(t0);
+SamplerState linear_sampler : register(s0);
+cbuffer constant0 : register(b0) {
+    float2 buffer_size;
+    float2 source_position;
+    float step_scale;
+    float step_progress;
+    float final_linear;
+};
+float4 radial_step(float4 pos : SV_Position) : SV_Target {
+    float2 pixel = pos.xy;
+    float4 current = shadow_texture[int2(pixel)];
+    float2 sample_pixel = source_position + (pixel - source_position) / step_scale;
+    float4 shifted = 0;
+    float4 shifted_point = 0;
+    if (all(sample_pixel >= 0) && all(sample_pixel < buffer_size)) {
+        shifted_point = shadow_texture[int2(sample_pixel)];
+        shifted = final_linear >= 0.5
+            ? shadow_texture.SampleLevel(linear_sampler, sample_pixel / buffer_size, 0)
+            : shifted_point;
+    }
+    float shifted_distance = shifted.a > 0
+        ? saturate(shifted.g / shifted.a + step_progress) : 0;
+    float coverage = current.a + (1 - current.a) * shifted.a;
+    float distance = current.a > 0 ? current.g / current.a : shifted_distance;
+    bool current_found = current.r > 0.01 && current.b > 0.01;
+    float source_x = current_found ? current.r : shifted_point.r;
+    float source_y = current_found ? current.b : shifted_point.b;
+    distance = coverage > 0 ? saturate(distance) : 1;
+    return float4(source_x, distance * coverage, source_y, coverage);
+}
+]]
+
+--[[pixelshader@smooth_distance:
+Texture2D shadow_texture : register(t0);
+cbuffer constant0 : register(b0) {
+    float2 buffer_size;
+};
+float4 smooth_distance(float4 pos : SV_Position) : SV_Target {
+    int2 center_position = int2(pos.xy);
+    float4 center = shadow_texture[center_position];
+    if (center.b <= 0.0001 || center.a <= 0.0001) return center;
+
+    // Radial construction quantizes the first-hit distance even when its
+    // geometry is already smooth. Fade makes those distance steps visible as
+    // contour bands, so filter only premultiplied distance metadata. Keeping
+    // the center R/B/A intact prevents this pass from expanding or blurring
+    // the actual shadow silhouette.
+    float distance_sum = 0;
+    float coverage_sum = 0;
+    int2 maximum_position = int2(buffer_size) - 1;
+    [unroll]
+    for (int y = -1; y <= 1; ++y) {
+        [unroll]
+        for (int x = -1; x <= 1; ++x) {
+            int2 sample_position = clamp(center_position + int2(x, y),
+                int2(0, 0), maximum_position);
+            float4 sample = shadow_texture[sample_position];
+            if (sample.b > 0.0001 && sample.a > 0.0001) {
+                distance_sum += sample.g;
+                coverage_sum += sample.a;
+            }
+        }
+    }
+    float distance = saturate(distance_sum / max(coverage_sum, 1e-6));
+    return float4(center.r, distance * center.a, center.b, center.a);
+}
+]]
+
+--[[pixelshader@resolve_source_color:
+Texture2D shadow_texture : register(t0);
+Texture2D source_texture : register(t1);
+cbuffer constant0 : register(b0) {
+    float2 source_size;
+    float work_scale;
+};
+float4 decode_source_color(float2 source_coordinate) {
+    if (any(source_coordinate < 0.01)) return 0;
+    float2 normalized_coordinate = saturate(
+        (source_coordinate - 0.125) / 0.75);
+    int2 source_position = int2(round(
+        normalized_coordinate * source_size - 0.5));
+    source_position = clamp(source_position, int2(0, 0), int2(source_size) - 1);
+    float4 source = source_texture[source_position];
+    if (source.a <= 0.0001) {
+        float best_alpha = 0;
+        [unroll]
+        for (int y = -1; y <= 1; ++y) {
+            [unroll]
+            for (int x = -1; x <= 1; ++x) {
+                int2 candidate_position = clamp(source_position + int2(x, y),
+                    int2(0, 0), int2(source_size) - 1);
+                float4 candidate = source_texture[candidate_position];
+                if (candidate.a > best_alpha) {
+                    source = candidate;
+                    best_alpha = candidate.a;
+                }
+            }
+        }
+    }
+    return source.a > 0.0001 ? float4(source.rgb / source.a, 1) : 0;
+}
+float4 resolve_source_color(float4 pos : SV_Position) : SV_Target {
+    if (work_scale < 1.5) {
+        return decode_source_color(shadow_texture[int2(pos.xy)].rb);
+    }
+    int2 base = int2(pos.xy) * 2;
+    float3 color_sum = 0;
+    float weight_sum = 0;
+    [unroll]
+    for (int y = 0; y < 2; ++y) {
+        [unroll]
+        for (int x = 0; x < 2; ++x) {
+            float4 info = shadow_texture[base + int2(x, y)];
+            float4 color = decode_source_color(info.rb);
+            float weight = info.a * color.a;
+            color_sum += color.rgb * weight;
+            weight_sum += weight;
+        }
+    }
+    return weight_sum > 1e-6 ? float4(color_sum / weight_sum, 1) : 0;
+}
+]]
+
+--[[pixelshader@style_shadow:
+Texture2D shadow_texture : register(t0);
+Texture2D texture_texture : register(t1);
+Texture2D source_color_texture : register(t2);
+SamplerState texture_sampler : register(s0);
+cbuffer constant0 : register(b0) {
+    float2 buffer_size;
+    float2 texture_offset;
+    float3 shadow_rgb;
+    float shadow_opacity;
+    float texture_type;
+    float texture_repeat;
+    float texture_scale_x;
+    float texture_scale_y;
+    float texture_mapping;
+    float2 texture_size;
+    float has_texture;
+    float texture_color_mix;
+    float texture_alpha_mix;
+    float shadow_mix;
+    float shadow_type;
+    float target_scale;
+};
+float3 mix_shadow_color(float4 source) {
+    float3 source_rgb = source.a > 1e-6
+        ? source.rgb : shadow_rgb;
+    return lerp(source_rgb, shadow_rgb, shadow_mix);
+}
+float2 texture_display_size() {
+    float texture_width = max(texture_size.x, 1);
+    float texture_height = max(texture_size.y, 1);
+    float display_width = buffer_size.x;
+    float display_height = buffer_size.y;
+    if (texture_mapping >= 0.5) {
+        float mapping_scale = min(buffer_size.x / texture_width,
+            buffer_size.y / texture_height);
+        if (texture_mapping >= 1.5) {
+            mapping_scale = max(buffer_size.x / texture_width,
+                buffer_size.y / texture_height);
+        }
+        if (texture_mapping >= 2.5) mapping_scale = 1;
+        display_width = texture_width * mapping_scale;
+        display_height = texture_height * mapping_scale;
+    }
+    return float2(max(display_width, 1), max(display_height, 1));
+}
+float remap_texture_distance(float distance) {
+    if (shadow_type < 0.5 || abs(target_scale - 1) < 1e-6) return distance;
+    float current_scale = pow(max(target_scale, 1e-6), distance);
+    return saturate((current_scale - 1) / (target_scale - 1));
+}
+float4 nearest_source_color(int2 position) {
+    float4 source = source_color_texture[position];
+    if (source.a > 0.0001) return source;
+    int2 maximum_position = int2(buffer_size) - 1;
+    float4 sum = 0;
+    [unroll]
+    for (int y = -1; y <= 1; ++y) {
+        [unroll]
+        for (int x = -1; x <= 1; ++x) {
+            sum += source_color_texture[clamp(position + int2(x, y),
+                int2(0, 0), maximum_position)];
+        }
+    }
+    return sum.a > 0.0001 ? float4(sum.rgb / sum.a, 1) : 0;
+}
+float4 style_shadow(float4 pos : SV_Position) : SV_Target {
+    float4 shadow_info = shadow_texture[int2(pos.xy)];
+    float shadow_distance = saturate(shadow_info.g / max(shadow_info.a, 1e-6));
+    float4 source = nearest_source_color(int2(pos.xy));
+    float3 mixed_shadow_rgb = mix_shadow_color(source);
+    float solid_alpha = shadow_info.a * shadow_opacity;
+    if (has_texture == 0) return float4(mixed_shadow_rgb * solid_alpha, solid_alpha);
+    float2 texture_uv;
+    bool outside = false;
+    if (texture_type == 1) {
+        float u = remap_texture_distance(shadow_distance)
+            * texture_scale_x / 100;
+        u = texture_repeat != 0 ? frac(u) : saturate(u);
+        texture_uv = float2(u, 0.5);
+    } else {
+        float2 display_size = texture_display_size();
+        float2 scaled_size = max(display_size
+            * float2(texture_scale_x, texture_scale_y) / 100, 0.01);
+        // Positive offsets move the centered texture right/down.
+        texture_uv = (pos.xy - texture_offset - buffer_size * 0.5)
+            / scaled_size + 0.5;
+        if (texture_repeat != 0) texture_uv = frac(texture_uv);
+        else outside = any(texture_uv < 0) || any(texture_uv > 1);
+    }
+    float4 texel = outside ? float4(0, 0, 0, 0)
+                          : texture_texture.SampleLevel(texture_sampler, texture_uv, 0);
+    // AviUtl buffers carry premultiplied RGB. Separate RGB from texture alpha
+    // so color-only influence does not dim partially transparent texels twice.
+    float3 texture_rgb = texel.rgb / max(texel.a, 1e-6);
+    float3 final_rgb = lerp(mixed_shadow_rgb, texture_rgb, texture_color_mix);
+    float final_alpha = solid_alpha * lerp(1, texel.a, texture_alpha_mix);
+    return float4(final_rgb * final_alpha, final_alpha);
+}
+]]
+
+--[[pixelshader@resolve_shadow:
+Texture2D shadow_texture : register(t0);
+cbuffer constant0 : register(b0) {
+    float2 buffer_size;
+    float fade_in;
+    float fade_out;
+    float work_scale;
+};
+float fade_weight(float distance) {
+    float root = fade_in >= 0.9999 ? 1
+        : smoothstep(0, max(1 - fade_in, 1e-6), distance);
+    float tip = fade_out <= 0.0001 ? 1
+        : smoothstep(0, fade_out, 1 - distance);
+    return root * tip;
+}
+float4 resolve_shadow(float4 pos : SV_Position) : SV_Target {
+    float4 shadow_info;
+    if (work_scale >= 1.5) {
+        int2 base = int2(pos.xy) * 2;
+        shadow_info = shadow_texture[base]
+            + shadow_texture[base + int2(1, 0)]
+            + shadow_texture[base + int2(0, 1)]
+            + shadow_texture[base + int2(1, 1)];
+        shadow_info /= 4;
+    } else {
+        shadow_info = shadow_texture[int2(pos.xy)];
+    }
+    float distance = saturate(shadow_info.g / max(shadow_info.a, 1e-6));
+    float weight = fade_weight(distance);
+    float geometry = shadow_info.r > 0.01 && shadow_info.b > 0.01 ? 1 : 0;
+    return float4(shadow_info.r * weight, shadow_info.g * weight,
+        geometry, shadow_info.a * weight);
+}
+]]
+
+--[[pixelshader@smooth_shadow:
+Texture2D styled_texture : register(t0);
+Texture2D shadow_texture : register(t1);
+SamplerState linear_sampler : register(s0);
+cbuffer constant0 : register(b0) {
+    float2 buffer_size;
+};
+float4 smooth_shadow(float4 pos : SV_Position) : SV_Target {
+    float4 center = styled_texture[int2(pos.xy)];
+    float center_geometry = shadow_texture[int2(pos.xy)].b;
+    float4 sum = 0;
+    int occupied = 0;
+    [unroll]
+    for (int y = -1; y <= 1; ++y) {
+        [unroll]
+        for (int x = -1; x <= 1; ++x) {
+            float2 uv = (pos.xy + float2(x, y)) / buffer_size;
+            float geometric_coverage = shadow_texture.SampleLevel(linear_sampler, uv, 0).b;
+            occupied += geometric_coverage >= 0.5 ? 1 : 0;
+            sum += styled_texture.SampleLevel(linear_sampler, uv, 0);
+        }
+    }
+    bool isolated_shadow = center_geometry >= 0.5 && occupied <= 2;
+    bool isolated_hole = center_geometry < 0.5 && occupied >= 7;
+    if (!isolated_shadow && !isolated_hole) return center;
+    return sum / 9;
+}
+]]
+
+--[[pixelshader@blur_shadow:
+Texture2D styled_texture : register(t0);
+SamplerState linear_sampler : register(s0);
+cbuffer constant0 : register(b0) {
+    float2 buffer_size;
+    float2 blur_direction;
+    float blur_radius;
+};
+float4 blur_shadow(float4 pos : SV_Position) : SV_Target {
+    int half_samples = min(16, max(1, (int)ceil(blur_radius)));
+    float spacing = blur_radius / half_samples;
+    float4 sum = 0;
+    float weight_sum = 0;
+    [loop]
+    for (int i = -16; i <= 16; ++i) {
+        if (abs(i) > half_samples) continue;
+        float weight = half_samples + 1 - abs(i);
+        float2 uv = (pos.xy + blur_direction * (i * spacing)) / buffer_size;
+        sum += styled_texture.SampleLevel(linear_sampler, uv, 0) * weight;
+        weight_sum += weight;
+    }
+    return sum / weight_sum;
+}
+]]
+
+--[[pixelshader@composite_shadow:
+Texture2D shadow_texture : register(t0);
+Texture2D source_texture : register(t1);
+cbuffer constant0 : register(b0) {
+    float2 source_offset;
+    float2 source_size;
+    float3 object_rgb;
+    float object_mix;
+    float object_opacity;
+};
+float4 color_object(float4 source) {
+    float3 straight_rgb = source.rgb / max(source.a, 1e-6);
+    float alpha = source.a * object_opacity;
+    float3 rgb = lerp(straight_rgb, object_rgb, object_mix);
+    return float4(rgb * alpha, alpha);
+}
+float4 neutralize_shadow(float4 shadow, float4 source) {
+    // Keep the shadow coverage under antialiased source pixels. Removing it
+    // exposes the partially transparent source over the background as a dark
+    // fringe. Instead, only replace its premultiplied color with the source's
+    // straight color across the source texture's one-byte AA support.
+    float edge_weight = saturate(source.a * 255);
+    if (edge_weight <= 0 || shadow.a <= 1e-6) return shadow;
+    float3 source_rgb = source.rgb / max(source.a, 1e-6);
+    float3 shadow_rgb = float3(shadow.r, shadow.g, shadow.b);
+    float3 rgb = lerp(shadow_rgb, source_rgb * shadow.a, edge_weight);
+    return float4(rgb, shadow.a);
+}
+float4 composite_shadow(float4 pos : SV_Position) : SV_Target {
+    float4 shadow = shadow_texture[int2(pos.xy)];
+    int2 source_pos = int2(floor(pos.xy - source_offset));
+    float4 source_sample = 0;
+    if (all(source_pos >= 0) && all(source_pos < int2(source_size))) {
+        source_sample = source_texture[source_pos];
+    }
+    shadow = neutralize_shadow(shadow, source_sample);
+    float4 source = color_object(source_sample);
+    return source + shadow * (1 - source.a);
+}
+]]
+
+if (texture_2d_scale_link) then texture_2d_scale_y = texture_2d_scale_x end
+local shadow_length = shadow_type == 0 and directional_length or radial_length
+local effective_quality = obj.getinfo("saving")
+    and math.max(quality, output_quality) or quality
+
+if shadow_type >= 1 and source_type == 0 then
+    obj.setanchor("source_x,source_y", 0, "screen")
+end
+
+local MAX_SAMPLES = 2048
+local MAX_DIRECT_SAMPLES = 8001
+local MAX_BUFFER_PIXELS = 16777216
+
+local function get_quality_config(level)
+    local configs = {
+        [0] = { sample_step = 4.0, refine_samples = 4 },
+        [1] = { sample_step = 2.0, refine_samples = 8 },
+        [2] = { sample_step = 1.0, refine_samples = 12 },
+        [3] = { sample_step = 0.5, refine_samples = 16 },
+    }
+    local config = configs[level] or configs[1]
+    return config.sample_step, config.refine_samples
+end
+
+local function resolve_source_position()
+    if source_type == 0 then
+        return source_x, source_y, true
+    end
+    local key = "layer" .. source_layer
+    if not obj.getvalue(key) then return 0, 0, false end
+    local x = obj.getvalue("layer" .. source_layer .. ".x")
+    local y = obj.getvalue("layer" .. source_layer .. ".y")
+    return x or 0, y or 0, x ~= nil and y ~= nil
+end
+
+local function screen_to_local(screen_x, screen_y)
+    -- lua.txt: getvalue is standard drawing; obj.* is the current effect state.
+    -- Modern axis scales already include zoom/aspect. Compatibility values
+    -- are only a fallback when axis scales are unavailable, never extra factors.
+    local function axis_scales(sx, sy, zoom, aspect)
+        zoom, aspect = zoom or 1, aspect or 0
+        return sx or zoom * (1 - math.max(aspect, 0)),
+               sy or zoom * (1 + math.min(aspect, 0))
+    end
+    local base_sx, base_sy = axis_scales(obj.getvalue("sx"), obj.getvalue("sy"),
+        (obj.getvalue("zoom") or 100) / 100, obj.getvalue("aspect"))
+    local effect_sx, effect_sy = axis_scales(obj.sx, obj.sy, obj.zoom, obj.aspect)
+    local dx = screen_x - (obj.getvalue("x") or obj.x) - (obj.ox or 0)
+    local dy = screen_y - (obj.getvalue("y") or obj.y) - (obj.oy or 0)
+    local r = math.rad(-((obj.getvalue("rz") or 0) + obj.rz))
+    local rx = dx * math.cos(r) - dy * math.sin(r)
+    local ry = dx * math.sin(r) + dy * math.cos(r)
+    local scale_x = math.max(math.abs(base_sx * effect_sx), 1e-6)
+    local scale_y = math.max(math.abs(base_sy * effect_sy), 1e-6)
+    -- Invert T(base + offset) * R(base + effect) * S(base * effect)
+    -- * T(-(base center + effect center)), before buffer-center/padding offsets.
+    return rx / scale_x + (obj.getvalue("cx") or 0) + obj.cx,
+           ry / scale_y + (obj.getvalue("cy") or 0) + obj.cy
+end
+
+local function get_radial_projection(mode, length, width, height)
+    local half_w, half_h = width / 2, height / 2
+    local reference_radius = math.max(math.sqrt(half_w * half_w + half_h * half_h), 1e-6)
+    local target_scale
+    if mode == 1 then
+        target_scale = 1 + length / reference_radius
+    else
+        -- A projected radius of 0.5 px is one rasterized endpoint. Clamping
+        -- continuously here keeps every quality tier on the same exponential
+        -- path instead of switching formulas at mathematical scale zero.
+        local point_scale = math.min(1, 0.5 / reference_radius)
+        target_scale = math.max(point_scale, 1 - length / reference_radius)
+    end
+    return target_scale, reference_radius * math.abs(target_scale - 1)
+end
+
+local function compute_padding(mode, length, angle_deg, source_x, source_y, width, height)
+    local margin = math.ceil(blur_shadow + (post_smooth and 1 or 0) + 2)
+    if mode == 0 then
+        local r = math.rad(angle_deg)
+        local dx, dy = math.cos(r) * length, math.sin(r) * length
+        return math.ceil(math.max(0, -dx) + margin),
+               math.ceil(math.max(0, -dy) + margin),
+               math.ceil(math.max(0,  dx) + margin),
+               math.ceil(math.max(0,  dy) + margin)
+    end
+    local target_scale = get_radial_projection(mode, length, width, height)
+    local half_w, half_h = width / 2, height / 2
+    local projected_left = source_x + (-half_w - source_x) * target_scale
+    local projected_right = source_x + (half_w - source_x) * target_scale
+    local projected_top = source_y + (-half_h - source_y) * target_scale
+    local projected_bottom = source_y + (half_h - source_y) * target_scale
+    return math.ceil(math.max(0, -half_w - math.min(-half_w, projected_left)) + margin),
+           math.ceil(math.max(0, -half_h - math.min(-half_h, projected_top)) + margin),
+           math.ceil(math.max(0, math.max(half_w, projected_right) - half_w) + margin),
+           math.ceil(math.max(0, math.max(half_h, projected_bottom) - half_h) + margin)
+end
+
+local function load_shadow_texture(enabled)
+    local has_texture = 0
+    local loaded_width, loaded_height = 1, 1
+    if not enabled then
+        obj.clearbuffer("cache:longshadown_texture", 1, 1)
+        return 0, loaded_width, loaded_height
+    end
+    -- Shared globals are stored as strings by AviUtl. Stop indirect cycles
+    -- before another load can overwrite a still-active object's backup.
+    if global.longshadown_texture_loading == "1" then
+        debug_print("[LongShadowN] solid fallback: nested texture reference")
+        obj.clearbuffer("cache:longshadown_texture", 1, 1)
+        return 0, loaded_width, loaded_height
+    end
+    -- Evaluate external effects before creating any shared source/shadow caches.
+    -- The backup is object-qualified so another LongShadowN cannot overwrite it.
+    if texture_type ~= 0 and texture_layer ~= obj.layer and obj.getvalue("layer" .. texture_layer) then
+        local backup = "cache:longshadown_texture_backup_" .. obj.id
+        local saved_cx, saved_cy = obj.cx, obj.cy
+        obj.copybuffer(backup, "object")
+        local previous_loading = global.longshadown_texture_loading
+        global.longshadown_texture_loading = "1"
+        local ok, loaded = pcall(function()
+            return obj.load("layer", texture_layer, true)
+        end)
+        global.longshadown_texture_loading = previous_loading or ""
+        if ok and loaded and obj.w > 0 and obj.h > 0 then
+            loaded_width, loaded_height = obj.w, obj.h
+            obj.copybuffer("cache:longshadown_texture", "object")
+            has_texture = 1
+        else
+            debug_print("[LongShadowN] solid fallback: texture load failed or empty", texture_layer)
+        end
+        obj.copybuffer("object", backup)
+        obj.cx, obj.cy = saved_cx, saved_cy
+    elseif texture_type ~= 0 then
+        debug_print("[LongShadowN] solid fallback: missing or self-referenced texture", texture_layer)
+    end
+    if has_texture == 0 then
+        -- Bind a valid resource even when the shader takes the solid branch.
+        obj.clearbuffer("cache:longshadown_texture", 1, 1)
+    end
+    return has_texture, loaded_width, loaded_height
+end
+
+local source_w, source_h = obj.w, obj.h
+local should_render_shadow = shadow_length > 0
+local source_pos_x, source_pos_y = 0, 0
+if shadow_type >= 1 then
+    local sx, sy, valid = resolve_source_position()
+    should_render_shadow = should_render_shadow and valid
+    if valid then
+        source_pos_x, source_pos_y = screen_to_local(sx, sy)
+        -- Keep both coordinates and their squared HLSL lengths representable.
+        local finite_position = source_pos_x == source_pos_x and source_pos_y == source_pos_y
+            and math.abs(source_pos_x) < 1e15 and math.abs(source_pos_y) < 1e15
+        if not finite_position then
+            should_render_shadow = false
+            source_pos_x, source_pos_y = 0, 0
+            debug_print("[LongShadowN] shadow skipped: nonfinite or excessive source position")
+        end
+    else
+        debug_print("[LongShadowN] shadow skipped: missing source position layer", source_layer)
+    end
+end
+
+local max_w, max_h = obj.getinfo("image_max")
+max_w, max_h = math.min(16384, max_w or 16384), math.min(16384, max_h or 16384)
+local invalid_size = source_w <= 0 or source_h <= 0 or source_w > max_w or source_h > max_h
+    or source_w * source_h > MAX_BUFFER_PIXELS
+should_render_shadow = should_render_shadow and not invalid_size
+if invalid_size then
+    debug_print("[LongShadowN] shadow skipped: empty or oversized input", source_w, source_h)
+    return
+end
+local left, top, right, bottom = compute_padding(shadow_type, shadow_length, angle,
+    source_pos_x, source_pos_y, source_w, source_h)
+if not should_render_shadow then
+    left, top, right, bottom = 0, 0, 0, 0
+end
+local function clamp_padding(first, last, available)
+    available = math.max(0, available)
+    if first + last <= available then return first, last end
+    debug_print("[LongShadowN] expansion clamped: requested padding exceeds image limit")
+    local kept_first = math.floor(first * available / (first + last))
+    return kept_first, available - kept_first
+end
+left, right = clamp_padding(left, right, max_w - source_w)
+top, bottom = clamp_padding(top, bottom, max_h - source_h)
+if (source_w + left + right) * (source_h + top + bottom) > MAX_BUFFER_PIXELS then
+    -- Shrink only the padding, retaining the entire source and each side's
+    -- proportional share. The existing center correction keeps it aligned.
+    local low, high = 0, 1
+    for _ = 1, 32 do
+        local factor = (low + high) / 2
+        local w = source_w + math.floor(left * factor) + math.floor(right * factor)
+        local h = source_h + math.floor(top * factor) + math.floor(bottom * factor)
+        if w * h <= MAX_BUFFER_PIXELS then low = factor else high = factor end
+    end
+    left, right = math.floor(left * low), math.floor(right * low)
+    top, bottom = math.floor(top * low), math.floor(bottom * low)
+    debug_print("[LongShadowN] expansion clamped: expanded buffer area budget")
+end
+local source_offset_x, source_offset_y = left, top
+source_pos_x = source_pos_x + source_offset_x + source_w / 2
+source_pos_y = source_pos_y + source_offset_y + source_h / 2
+
+local has_texture, texture_w, texture_h = load_shadow_texture(should_render_shadow)
+-- External effects may use the same names. Reset scratch resources after their
+-- evaluation, then overwrite every source/resource before any subsequent read.
+for _, name in ipairs({ "shadow_a", "shadow_b", "shadow_c", "resolved", "source_color", "final", "filtered", "source" }) do
+    obj.clearbuffer("cache:longshadown_" .. name, 1, 1)
+end
+
+local function render_fast_directional(buffer_w, buffer_h, offset_x, offset_y, work_scale)
+    local r = math.rad(angle)
+    local dx, dy = math.cos(r), math.sin(r)
+    local work_length = shadow_length * work_scale
+    local buffers = {
+        "cache:longshadown_shadow_a",
+        "cache:longshadown_shadow_b",
+        "cache:longshadown_shadow_c",
+    }
+    for _, buffer in ipairs(buffers) do obj.clearbuffer(buffer, buffer_w, buffer_h) end
+    obj.pixelshader("seed_shadow", buffers[1], "cache:longshadown_source",
+        { offset_x, offset_y, source_w, source_h, work_scale }, "copy", "clamp")
+    local function free_buffer(first, second)
+        for _, buffer in ipairs(buffers) do
+            if buffer ~= first and buffer ~= second then return buffer end
+        end
+    end
+    local block = buffers[1]
+    local accumulator = nil
+    local block_size = 1
+    local accumulated = 0
+    local remaining = math.floor(work_length) + 1
+    while remaining > 0 do
+        if remaining % 2 == 1 then
+            if accumulator == nil then
+                accumulator = free_buffer(block, nil)
+                obj.copybuffer(accumulator, block)
+            else
+                local destination = free_buffer(block, accumulator)
+                obj.pixelshader("directional_step", destination, { accumulator, block },
+                    { buffer_w, buffer_h, dx, dy, accumulated, work_length, 1 }, "copy", "clip")
+                accumulator = destination
+            end
+            accumulated = accumulated + block_size
+        end
+        remaining = math.floor(remaining / 2)
+        if remaining > 0 then
+            local destination = free_buffer(block, accumulator)
+            obj.pixelshader("directional_step", destination, { block, block },
+                { buffer_w, buffer_h, dx, dy, block_size, work_length, 1 }, "copy", "clip")
+            block = destination
+            block_size = block_size * 2
+        end
+    end
+    local fractional = work_length - math.floor(work_length)
+    if fractional > 1e-6 then
+        local endpoint = free_buffer(accumulator, nil)
+        obj.pixelshader("seed_shadow", endpoint, "cache:longshadown_source",
+            { offset_x, offset_y, source_w, source_h, work_scale }, "copy", "clamp")
+        local destination = free_buffer(accumulator, endpoint)
+        obj.pixelshader("directional_step", destination, { accumulator, endpoint },
+            { buffer_w, buffer_h, dx, dy, work_length, work_length, fractional }, "copy", "clip")
+        accumulator = destination
+    end
+    if accumulator ~= buffers[1] then obj.copybuffer(buffers[1], accumulator) end
+    local direct_step = get_quality_config(effective_quality)
+    return math.min(MAX_DIRECT_SAMPLES,
+        math.max(2, math.ceil(shadow_length * work_scale / direct_step) + 1))
+end
+
+local function render_radial_scale(buffer_w, buffer_h, source_pos_x, source_pos_y, work_scale)
+    local target_scale, effective_length = get_radial_projection(shadow_type, shadow_length,
+        source_w, source_h)
+    local quality_step = get_quality_config(effective_quality)
+    local work_source_x, work_source_y = source_pos_x * work_scale, source_pos_y * work_scale
+    local requested_intervals = math.min(MAX_SAMPLES - 1,
+        math.max(1, math.ceil(effective_length * work_scale / quality_step)))
+    local sample_count = 2
+    while sample_count < requested_intervals + 1 do sample_count = sample_count * 2 end
+    sample_count = math.min(MAX_SAMPLES, sample_count)
+    local base_scale = target_scale ^ (1 / (sample_count - 1))
+
+    obj.clearbuffer("cache:longshadown_shadow_a", buffer_w, buffer_h)
+    obj.clearbuffer("cache:longshadown_shadow_b", buffer_w, buffer_h)
+    obj.pixelshader("seed_shadow", "cache:longshadown_shadow_a", "cache:longshadown_source",
+        { source_offset_x, source_offset_y, source_w, source_h, work_scale }, "copy", "clamp")
+    local covered, read_a = 1, true
+    while covered < sample_count do
+        local src = read_a and "cache:longshadown_shadow_a" or "cache:longshadown_shadow_b"
+        local dst = read_a and "cache:longshadown_shadow_b" or "cache:longshadown_shadow_a"
+        local step_scale = base_scale ^ covered
+        local step_progress = covered / (sample_count - 1)
+        local final_linear = covered * 2 >= sample_count and 1 or 0
+        obj.pixelshader("radial_step", dst, src,
+            { buffer_w, buffer_h, work_source_x, work_source_y,
+              step_scale, step_progress, final_linear }, "copy", "clip")
+        covered = covered * 2
+        read_a = not read_a
+    end
+    if not read_a then
+        obj.copybuffer("cache:longshadown_shadow_a", "cache:longshadown_shadow_b")
+    end
+    -- Fade and 1D textures expose the discrete first-hit distances produced by
+    -- the logarithmic scale passes. Smooth that metadata only; the shader
+    -- deliberately preserves the center geometry and coverage channels.
+    obj.pixelshader("smooth_distance", "cache:longshadown_shadow_b", "cache:longshadown_shadow_a",
+        { buffer_w, buffer_h }, "copy", "clamp")
+    obj.copybuffer("cache:longshadown_shadow_a", "cache:longshadown_shadow_b")
+    local refine_intervals = math.min(MAX_DIRECT_SAMPLES - 1,
+        math.max(1, math.ceil(effective_length * work_scale / quality_step)))
+    return target_scale, refine_intervals + 1
+end
+
+local function render_ultra_raymarch(buffer_w, buffer_h, source_pos_x, source_pos_y, work_scale)
+    local target_scale, effective_length = 1, shadow_length
+    if shadow_type >= 1 then
+        target_scale, effective_length = get_radial_projection(
+            shadow_type, shadow_length, source_w, source_h)
+    end
+    local sample_count = math.min(MAX_DIRECT_SAMPLES,
+        math.max(2, math.ceil(effective_length * work_scale) + 1))
+    obj.clearbuffer("cache:longshadown_shadow_a", buffer_w, buffer_h)
+    obj.pixelshader("raymarch_shadow", "cache:longshadown_shadow_a",
+        "cache:longshadown_source",
+        { buffer_w, buffer_h, source_offset_x, source_offset_y, source_w, source_h,
+          source_pos_x, source_pos_y, math.cos(math.rad(angle)), math.sin(math.rad(angle)),
+          shadow_length, target_scale, shadow_type, sample_count, work_scale },
+        "copy", "clamp")
+    return target_scale, sample_count
+end
+
+local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
+    target_scale, refine_sample_count, refine_samples)
+    local red = math.floor(shadow_color / 65536) % 256 / 255
+    local green = math.floor(shadow_color / 256) % 256 / 255
+    local blue = shadow_color % 256 / 255
+    local repeat_flag = texture_repeat and 1 or 0
+    obj.clearbuffer("cache:longshadown_source_color", buffer_w, buffer_h)
+    obj.pixelshader("resolve_source_color", "cache:longshadown_source_color",
+        { "cache:longshadown_shadow_a", "cache:longshadown_source" },
+        { source_w, source_h, work_scale }, "copy", "clamp")
+    obj.clearbuffer("cache:longshadown_resolved", buffer_w, buffer_h)
+    obj.pixelshader("resolve_shadow", "cache:longshadown_resolved", "cache:longshadown_shadow_a",
+        { buffer_w, buffer_h, fade_in, fade_out, work_scale }, "copy", "clamp")
+    obj.clearbuffer("cache:longshadown_shadow_b", buffer_w, buffer_h)
+    obj.pixelshader("edge_antialias", "cache:longshadown_shadow_b",
+        { "cache:longshadown_resolved", "cache:longshadown_source" },
+        { buffer_w, buffer_h, source_offset_x, source_offset_y, source_w, source_h,
+          source_pos_x, source_pos_y, math.cos(math.rad(angle)), math.sin(math.rad(angle)),
+          shadow_length, target_scale, shadow_type, refine_sample_count, refine_samples,
+          fade_in, fade_out, effective_quality >= 2 and 1 or 0 }, "copy", "clamp")
+    obj.copybuffer("cache:longshadown_resolved", "cache:longshadown_shadow_b")
+    obj.clearbuffer("cache:longshadown_final", buffer_w, buffer_h)
+    -- Clamp preserves the 1D endpoints; wrapped UVs and the loop sampler give
+    -- repeating textures continuous interpolation across their seam.
+    if texture_repeat then
+        obj.pixelshader("style_shadow", "cache:longshadown_final",
+            { "cache:longshadown_resolved", "cache:longshadown_texture", "cache:longshadown_source_color" },
+            { buffer_w, buffer_h, texture_x, texture_y, red, green, blue, shadow_opacity / 100,
+              texture_type, repeat_flag,
+              texture_type == 1 and texture_1d_scale or texture_2d_scale_x,
+              texture_type == 2 and texture_2d_scale_y or 100,
+              texture_mapping, texture_w, texture_h, has_texture,
+              texture_color_mix / 100, texture_alpha_mix / 100,
+              shadow_mix / 100, shadow_type, target_scale }, "copy", "loop")
+    else
+        obj.pixelshader("style_shadow", "cache:longshadown_final",
+            { "cache:longshadown_resolved", "cache:longshadown_texture", "cache:longshadown_source_color" },
+            { buffer_w, buffer_h, texture_x, texture_y, red, green, blue, shadow_opacity / 100,
+              texture_type, repeat_flag,
+              texture_type == 1 and texture_1d_scale or texture_2d_scale_x,
+              texture_type == 2 and texture_2d_scale_y or 100,
+              texture_mapping, texture_w, texture_h, has_texture,
+              texture_color_mix / 100, texture_alpha_mix / 100,
+              shadow_mix / 100, shadow_type, target_scale }, "copy", "clamp")
+    end
+    if post_smooth then
+        obj.clearbuffer("cache:longshadown_filtered", buffer_w, buffer_h)
+        obj.pixelshader("smooth_shadow", "cache:longshadown_filtered",
+            { "cache:longshadown_final", "cache:longshadown_resolved" },
+            { buffer_w, buffer_h }, "copy", "clip")
+        obj.copybuffer("cache:longshadown_final", "cache:longshadown_filtered")
+    end
+    if blur_shadow > 0 then
+        obj.clearbuffer("cache:longshadown_filtered", buffer_w, buffer_h)
+        obj.pixelshader("blur_shadow", "cache:longshadown_filtered", "cache:longshadown_final",
+            { buffer_w, buffer_h, 1, 0, blur_shadow }, "copy", "clip")
+        obj.pixelshader("blur_shadow", "cache:longshadown_final", "cache:longshadown_filtered",
+            { buffer_w, buffer_h, 0, 1, blur_shadow }, "copy", "clip")
+    end
+end
+
+-- Preserve the unexpanded source; seed_shadow places it at the padding offset.
+obj.copybuffer("cache:longshadown_source", "object")
+obj.cx = obj.cx - (right - left) / 2
+obj.cy = obj.cy - (bottom - top) / 2
+obj.effect("領域拡張", "上", top, "下", bottom, "左", left, "右", right, "塗りつぶし", 1)
+
+local requested_work_scale = supersampling == 1 and 2 or 1
+local work_scale = requested_work_scale
+if obj.w * work_scale > max_w or obj.h * work_scale > max_h
+    or obj.w * obj.h * work_scale * work_scale > MAX_BUFFER_PIXELS then
+    work_scale = 1
+    debug_print('[LongShadowN] 2x supersampling disabled: work buffer limit')
+end
+local work_w, work_h = obj.w * work_scale, obj.h * work_scale
+
+if should_render_shadow then
+    local target_scale = 1
+    local refine_sample_count
+    local _, refine_samples = get_quality_config(effective_quality)
+    if effective_quality == 3 then
+        target_scale, refine_sample_count = render_ultra_raymarch(
+            work_w, work_h, source_pos_x, source_pos_y, work_scale)
+    elseif shadow_type == 0 then
+        refine_sample_count = render_fast_directional(
+            work_w, work_h, source_offset_x, source_offset_y, work_scale)
+    elseif shadow_type == 1 or shadow_type == 2 then
+        target_scale, refine_sample_count = render_radial_scale(
+            work_w, work_h, source_pos_x, source_pos_y, work_scale)
+    end
+    style_and_filter_shadow(obj.w, obj.h, work_scale,
+        target_scale, refine_sample_count, refine_samples)
+else
+    -- Both caches are current-frame transparency, never previous-frame results.
+    obj.clearbuffer("cache:longshadown_shadow_a", obj.w, obj.h)
+    obj.clearbuffer("cache:longshadown_resolved", obj.w, obj.h)
+    obj.clearbuffer("cache:longshadown_final", obj.w, obj.h)
+    debug_print("[LongShadowN] shadow skipped: zero length or invalid source position")
+end
+
+local object_red = math.floor(object_color / 65536) % 256 / 255
+local object_green = math.floor(object_color / 256) % 256 / 255
+local object_blue = object_color % 256 / 255
+obj.pixelshader("composite_shadow", "object",
+    { "cache:longshadown_final", "cache:longshadown_source" },
+    { source_offset_x, source_offset_y, source_w, source_h,
+      object_red, object_green, object_blue, object_mix / 100, object_opacity / 100 }, "copy")

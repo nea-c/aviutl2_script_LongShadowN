@@ -1,0 +1,10 @@
+﻿{
+  "zipName": "LongShadowN.zip",
+  "exclude": [
+    ".git/",
+    ".gitignore",
+    "/*.zip",
+    "resources_zip.bat",
+    "resources_zip.json"
+  ]
+}
