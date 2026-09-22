@@ -74,7 +74,7 @@
 --group:Post-processing,false
 --select@supersampling:Supersampling=0,None=0,2x=1
 --check@post_smooth:Post Smooth,false
---track@blur_shadow:Blur Shadow,0,100,0,0.01
+--track@blur_shadow:Blur Shadow,0,200,0,0.1
 --group
 
 --[[pixelshader@seed_shadow:
@@ -619,26 +619,93 @@ float4 smooth_shadow(float4 pos : SV_Position) : SV_Target {
 
 --[[pixelshader@blur_shadow:
 Texture2D styled_texture : register(t0);
+Texture2D distance_texture : register(t1);
 SamplerState linear_sampler : register(s0);
 cbuffer constant0 : register(b0) {
     float2 buffer_size;
     float2 blur_direction;
     float blur_radius;
 };
+float distance_blur_radius(float distance, float maximum_radius) {
+    return maximum_radius * saturate(distance);
+}
+float distance_blur_weight(float offset, float local_radius, float spacing) {
+    return max(0, local_radius + spacing - offset);
+}
+int blur_half_samples(float radius) {
+    int original_samples = min(16, max(1, (int)ceil(radius)));
+    int density_samples = (int)ceil(radius / 3.125);
+    return min(64, max(original_samples, density_samples));
+}
 float4 blur_shadow(float4 pos : SV_Position) : SV_Target {
-    int half_samples = min(16, max(1, (int)ceil(blur_radius)));
+    int half_samples = blur_half_samples(blur_radius);
     float spacing = blur_radius / half_samples;
+    float2 center_uv = pos.xy / buffer_size;
+    float4 distance_info = distance_texture.SampleLevel(linear_sampler, center_uv, 0);
+    float distance = distance_info.a > 0.0001
+        ? saturate(distance_info.g / distance_info.a) : 0;
+    float local_radius = distance_blur_radius(distance, blur_radius);
+    if (local_radius <= 0.0001) {
+        return styled_texture.SampleLevel(linear_sampler, center_uv, 0);
+    }
     float4 sum = 0;
     float weight_sum = 0;
     [loop]
-    for (int i = -16; i <= 16; ++i) {
+    for (int i = -64; i <= 64; ++i) {
         if (abs(i) > half_samples) continue;
-        float weight = half_samples + 1 - abs(i);
+        float offset = abs(i * spacing);
         float2 uv = (pos.xy + blur_direction * (i * spacing)) / buffer_size;
+        float weight = distance_blur_weight(offset, local_radius, spacing);
+        if (weight <= 0) continue;
         sum += styled_texture.SampleLevel(linear_sampler, uv, 0) * weight;
         weight_sum += weight;
     }
-    return sum / weight_sum;
+    return weight_sum > 0 ? sum / weight_sum : 0;
+}
+]]
+
+--[[pixelshader@spread_blur_distance:
+Texture2D distance_texture : register(t0);
+SamplerState linear_sampler : register(s0);
+cbuffer constant0 : register(b0) {
+    float2 buffer_size;
+    float2 blur_direction;
+    float blur_radius;
+};
+float distance_blur_radius(float distance, float maximum_radius) {
+    return maximum_radius * saturate(distance);
+}
+float distance_blur_weight(float offset, float local_radius, float spacing) {
+    return max(0, local_radius + spacing - offset);
+}
+int blur_half_samples(float radius) {
+    int original_samples = min(16, max(1, (int)ceil(radius)));
+    int density_samples = (int)ceil(radius / 3.125);
+    return min(64, max(original_samples, density_samples));
+}
+float spread_distance_candidate(float distance, float offset,
+    float maximum_radius, float spacing) {
+    float local_radius = distance_blur_radius(distance, maximum_radius);
+    float edge_coverage = saturate(
+        (local_radius + spacing - offset) / max(spacing, 1e-6));
+    return distance * edge_coverage;
+}
+float4 spread_blur_distance(float4 pos : SV_Position) : SV_Target {
+    int half_samples = blur_half_samples(blur_radius);
+    float spacing = blur_radius / half_samples;
+    float spread_distance = 0;
+    [loop]
+    for (int i = -64; i <= 64; ++i) {
+        if (abs(i) > half_samples) continue;
+        float offset = abs(i * spacing);
+        float2 uv = (pos.xy + blur_direction * (i * spacing)) / buffer_size;
+        float4 distance_info = distance_texture.SampleLevel(linear_sampler, uv, 0);
+        float distance = distance_info.a > 0.0001
+            ? saturate(distance_info.g / distance_info.a) : 0;
+        spread_distance = max(spread_distance,
+            spread_distance_candidate(distance, offset, blur_radius, spacing));
+    }
+    return spread_distance > 0 ? float4(0, spread_distance, 1, 1) : 0;
 }
 ]]
 
@@ -1072,10 +1139,20 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
         obj.copybuffer("cache:longshadown_final", "cache:longshadown_filtered")
     end
     if blur_shadow > 0 then
-        obj.clearbuffer("cache:longshadown_filtered", buffer_w, buffer_h)
-        obj.pixelshader("blur_shadow", "cache:longshadown_filtered", "cache:longshadown_final",
+        obj.clearbuffer("cache:longshadown_blur_distance_a", buffer_w, buffer_h)
+        obj.pixelshader("spread_blur_distance", "cache:longshadown_blur_distance_a",
+            "cache:longshadown_resolved",
             { buffer_w, buffer_h, 1, 0, blur_shadow }, "copy", "clip")
-        obj.pixelshader("blur_shadow", "cache:longshadown_final", "cache:longshadown_filtered",
+        obj.clearbuffer("cache:longshadown_blur_distance_b", buffer_w, buffer_h)
+        obj.pixelshader("spread_blur_distance", "cache:longshadown_blur_distance_b",
+            "cache:longshadown_blur_distance_a",
+            { buffer_w, buffer_h, 0, 1, blur_shadow }, "copy", "clip")
+        obj.clearbuffer("cache:longshadown_filtered", buffer_w, buffer_h)
+        obj.pixelshader("blur_shadow", "cache:longshadown_filtered",
+            { "cache:longshadown_final", "cache:longshadown_blur_distance_b" },
+            { buffer_w, buffer_h, 1, 0, blur_shadow }, "copy", "clip")
+        obj.pixelshader("blur_shadow", "cache:longshadown_final",
+            { "cache:longshadown_filtered", "cache:longshadown_blur_distance_b" },
             { buffer_w, buffer_h, 0, 1, blur_shadow }, "copy", "clip")
     end
 end
