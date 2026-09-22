@@ -56,7 +56,7 @@
 --track@texture_2d_scale_y:Texture::Scale Y,1,1000,100,0.001
 --check@texture_repeat:Texture::Repeat,false
 --track@texture_color_mix:Texture::Mix,0,100,100,0.01
---track@texture_alpha_mix:Texture::Opacity,0,100,100,1
+--track@texture_alpha_mix:Texture::Opacity,0,100,100,0.01
 --hide@texture_layer:texture_type==0
 --hide@texture_x:texture_type<2
 --hide@texture_y:texture_type<2
