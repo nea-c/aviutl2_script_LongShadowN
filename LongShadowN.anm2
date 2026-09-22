@@ -62,6 +62,7 @@
 --hide@texture_y:texture_type<2
 --hide@texture_mapping:texture_type<2
 --hide@texture_1d_scale:texture_type~=1
+--hide@texture_2d_scale_link:texture_type<2
 --hide@texture_2d_scale_x:texture_type<2
 --hide@texture_2d_scale_y:texture_type<2
 --hide@texture_2d_scale_y:texture_2d_scale_link==1
