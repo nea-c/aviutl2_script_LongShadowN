@@ -74,7 +74,7 @@
 --group:Post-processing,false
 --select@supersampling:Supersampling=0,None=0,2x=1
 --check@post_smooth:Post Smooth,false
---track@blur_shadow:Blur Shadow,0,200,0,0.1
+--track@blur_shadow:Blur Shadow,0,4000,0,0.1
 --group
 
 --[[pixelshader@seed_shadow:
