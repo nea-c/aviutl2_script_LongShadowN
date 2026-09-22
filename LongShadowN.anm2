@@ -50,10 +50,10 @@
 --track@texture_x:Texture::Offset X,-100000,100000,0,0.01
 --track@texture_y:Texture::Offset Y,-100000,100000,0,0.01
 --select@texture_mapping:Texture::Mapping=0,Stretch=0,Fit=1,Fill=2,Original=3
---track@texture_1d_scale:Texture::Scale,1,1000,100,0.001
+--track@texture_1d_scale:Texture::Scale,1,4000,100,0.001
 --check@texture_2d_scale_link:Link Scale,false
---track@texture_2d_scale_x:Texture::Scale X,1,1000,100,0.001
---track@texture_2d_scale_y:Texture::Scale Y,1,1000,100,0.001
+--track@texture_2d_scale_x:Texture::Scale X,1,4000,100,0.001
+--track@texture_2d_scale_y:Texture::Scale Y,1,4000,100,0.001
 --check@texture_repeat:Texture::Repeat,false
 --track@texture_color_mix:Texture::Mix,0,100,100,0.01
 --track@texture_alpha_mix:Texture::Opacity,0,100,100,0.01

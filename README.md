@@ -8,9 +8,12 @@
 
 ## 最新 / Latest
 
-**r6**
+**r7**
 
 ## 変更履歴 / Change log
+
+- r7
+  - TextureグループのScale,ScaleX/Yの範囲上限を`4000`に変更
 
 - r6
   - `Blur Shadow` を、影の根元から離れるほどボケ量が強くなる方式に変更
