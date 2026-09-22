@@ -7,16 +7,16 @@
 --select@output_quality:Output Quality=2,Draft=0,Standard=1,High=2,Ultra=3
 
 --separator:Shadow
---track@angle:Direction,-3600,3600,45,0.1
---track@directional_length:Directional::Length,0,4000,200,0.1
+--track@angle:Direction,-3600,3600,45,0.01
+--track@directional_length:Directional::Length,0,4000,200,0.01
 --hide@angle:shadow_type>0
 --hide@directional_length:shadow_type>0
 
 --select@source_type:Source Type=0,Anchor=0,Layer=1
---track@source_x:X,-100000,100000,0,0.1
---track@source_y:Y,-100000,100000,0,0.1
+--track@source_x:X,-100000,100000,0,0.01
+--track@source_y:Y,-100000,100000,0,0.01
 --track@source_layer:Layer,1,1000,1,1
---track@radial_length:Radial::Length,0,4000,200,0.1
+--track@radial_length:Radial::Length,0,4000,200,0.01
 --hide@source_type:shadow_type<1
 --hide@source_x:shadow_type<1
 --hide@source_x:source_type==1
