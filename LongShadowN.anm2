@@ -91,6 +91,7 @@ cbuffer constant0 : register(b0) {
     float work_scale;
     float fade_in;
     float fade_out;
+    float layer_selector;
 };
 float sample_source_alpha_direct(float2 pixel) {
     float2 local = pixel - source_offset;
@@ -133,6 +134,47 @@ bool accumulate_faded_shadow_sample(float sample_alpha, float root_alpha,
     weighted_distance += distance * (combined - coverage);
     coverage = combined;
     return true;
+}
+struct LayeredSampleState {
+    float front_coverage, front_distance;
+    float rear_coverage, rear_distance;
+    float2 front_source, rear_source;
+    bool front_started, front_open;
+};
+void accumulate_layered_sample(float sample_alpha, float root_alpha,
+    float distance, float fade_weight, float2 source_coordinate,
+    inout LayeredSampleState state) {
+    float support = conditional_shadow_coverage(sample_alpha, root_alpha);
+    if (support <= 1.0 / 255.0) {
+        if (state.front_started) state.front_open = false;
+        return;
+    }
+    if (!state.front_started) {
+        state.front_started = true;
+        state.front_open = true;
+    }
+    float candidate = support * fade_weight;
+    bool front = state.front_open;
+    float previous = front ? state.front_coverage : state.rear_coverage;
+    float combined = max(previous, candidate);
+    float gain = combined - previous;
+    if (front) {
+        state.front_coverage = combined;
+        state.front_distance += distance * gain;
+        if (gain > 1e-7) state.front_source = source_coordinate;
+    } else {
+        state.rear_coverage = combined;
+        state.rear_distance += distance * gain;
+        if (gain > 1e-7) state.rear_source = source_coordinate;
+    }
+}
+float4 pack_layered_shadow(LayeredSampleState state, float selector) {
+    bool front = selector < 0.5;
+    float coverage = front ? state.front_coverage : state.rear_coverage;
+    if (coverage <= 0) return 0;
+    float2 source = front ? state.front_source : state.rear_source;
+    float distance = front ? state.front_distance : state.rear_distance;
+    return float4(source.x, distance, source.y, coverage);
 }
 bool clip_parameter_axis(float origin, float delta, float bounds_min,
     float bounds_max, inout float interval_min, inout float interval_max) {
@@ -256,6 +298,7 @@ float4 direct_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
     float coverage = 0;
     float weighted_distance = 0;
     float2 selected_source_coordinate = 0;
+    LayeredSampleState layer_state = (LayeredSampleState)0;
     [loop]
     for (int sample = 0; sample < 8001; ++sample) {
         if (sample >= active_samples) break;
@@ -272,15 +315,23 @@ float4 direct_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
             distance = projection_distance_from_u(target_scale, parameter);
         }
         float sample_alpha = sample_source_alpha_direct(source_pixel);
-        if (accumulate_faded_shadow_sample(sample_alpha, root_alpha, distance,
-                coverage, weighted_distance)) {
-            float2 source_local = clamp(floor(source_pixel - source_offset),
-                0, source_size - 1);
-            selected_source_coordinate = 0.125
-                + 0.75 * (source_local + 0.5) / source_size;
+        float2 source_local = clamp(floor(source_pixel - source_offset),
+            0, source_size - 1);
+        float2 source_coordinate = 0.125
+            + 0.75 * (source_local + 0.5) / source_size;
+        if (layer_selector < -0.5) {
+            if (accumulate_faded_shadow_sample(sample_alpha, root_alpha, distance,
+                    coverage, weighted_distance)) {
+                selected_source_coordinate = source_coordinate;
+            }
+            if (coverage >= 0.9999) break;
+        } else {
+            accumulate_layered_sample(sample_alpha, root_alpha, distance,
+                fade_weight_sample(distance), source_coordinate, layer_state);
         }
-        if (coverage >= 0.9999) break;
     }
+    if (layer_selector >= -0.5)
+        return pack_layered_shadow(layer_state, layer_selector);
     return float4(selected_source_coordinate.x, weighted_distance,
         selected_source_coordinate.y, coverage);
 }
@@ -306,6 +357,7 @@ cbuffer constant0 : register(b0) {
     float dense_refine;
     float direct_quality_step;
     float work_scale;
+    float layer_selector;
 };
 float2 refine_offset(int index) {
     int pair_index = index >> 1;
@@ -463,6 +515,47 @@ float direct_sample_parameter(float start_parameter, float end_parameter,
     return lerp(start_parameter, end_parameter,
         sample / max(active_samples - 1.0, 1.0));
 }
+struct LayeredSampleState {
+    float front_coverage, front_distance;
+    float rear_coverage, rear_distance;
+    float2 front_source, rear_source;
+    bool front_started, front_open;
+};
+void accumulate_layered_sample(float sample_alpha, float root_alpha,
+    float distance, float fade_weight, float2 source_coordinate,
+    inout LayeredSampleState state) {
+    float support = conditional_shadow_coverage(sample_alpha, root_alpha);
+    if (support <= 1.0 / 255.0) {
+        if (state.front_started) state.front_open = false;
+        return;
+    }
+    if (!state.front_started) {
+        state.front_started = true;
+        state.front_open = true;
+    }
+    float candidate = support * fade_weight;
+    bool front = state.front_open;
+    float previous = front ? state.front_coverage : state.rear_coverage;
+    float combined = max(previous, candidate);
+    float gain = combined - previous;
+    if (front) {
+        state.front_coverage = combined;
+        state.front_distance += distance * gain;
+        if (gain > 1e-7) state.front_source = source_coordinate;
+    } else {
+        state.rear_coverage = combined;
+        state.rear_distance += distance * gain;
+        if (gain > 1e-7) state.rear_source = source_coordinate;
+    }
+}
+float4 pack_layered_shadow(LayeredSampleState state, float selector) {
+    bool front = selector < 0.5;
+    float coverage = front ? state.front_coverage : state.rear_coverage;
+    if (coverage <= 0) return 0;
+    float2 source = front ? state.front_source : state.rear_source;
+    float distance = front ? state.front_distance : state.rear_distance;
+    return float4(source.x, distance, source.y, coverage);
+}
 float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
     float4 center = shadow_texture[int2(pos.xy)];
     float min_geometry = center.b;
@@ -505,6 +598,7 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
         float coverage = 0;
         float weighted_distance = 0;
         bool found_shadow = false;
+        LayeredSampleState layer_state = (LayeredSampleState)0;
         float active_sample_count = sample_count;
         int active_samples = 2;
         float start_parameter = 0;
@@ -552,14 +646,24 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
                     - direction * (distance * total_length);
             }
             float sample_alpha = sample_source_alpha(source_pixel);
-            if (accumulate_faded_shadow_sample(sample_alpha, root_alpha,
-                    distance, coverage, weighted_distance)) {
-                found_shadow = true;
+            if (layer_selector < -0.5) {
+                if (accumulate_faded_shadow_sample(sample_alpha, root_alpha,
+                        distance, coverage, weighted_distance)) {
+                    found_shadow = true;
+                }
+                if (coverage >= 0.9999) break;
+            } else {
+                accumulate_layered_sample(sample_alpha, root_alpha, distance,
+                    fade_weight_sample(distance), 0, layer_state);
             }
-            if (coverage >= 0.9999) break;
         }
         float4 contribution = float4(coverage, weighted_distance,
             found_shadow ? 1 : 0, coverage);
+        if (layer_selector >= -0.5) {
+            float4 selected = pack_layered_shadow(layer_state, layer_selector);
+            contribution = float4(selected.a, selected.g,
+                selected.a > 0 ? 1 : 0, selected.a);
+        }
         refined += contribution;
     }
     return refined / refine_samples;

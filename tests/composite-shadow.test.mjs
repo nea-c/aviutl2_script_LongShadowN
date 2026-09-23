@@ -692,6 +692,54 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
   }
 });
 
+test("layered Direct samples retain ordered intervals and raw rear coverage", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(/--\[\[pixelshader@direct_raymarch_shadow:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(shader);
+  const state = shader.match(/struct LayeredSampleState\s*\{[\s\S]*?\};/)?.[0];
+  assert.ok(state, "LayeredSampleState was not found");
+  const conditional = extractFunction(shader, "conditional_shadow_coverage", "float");
+  const shadowOnly = extractFunction(shader, "shadow_only_coverage", "float");
+  const accumulate = extractFunction(shader, "accumulate_layered_sample", "void");
+  const pack = extractFunction(shader, "pack_layered_shadow");
+  const assembly = compileConstantResult(`
+${shadowOnly}
+${conditional}
+${state}
+${accumulate}
+${pack}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    LayeredSampleState split = (LayeredSampleState)0;
+    accumulate_layered_sample(.4, 0, .3, 1, float2(.2,.2), split);
+    accumulate_layered_sample(0, 0, .5, 1, 0, split);
+    accumulate_layered_sample(.8, 0, .8, 1, float2(.8,.8), split);
+    float4 front = pack_layered_shadow(split, 0);
+    float4 rear = pack_layered_shadow(split, 1);
+    bool split_ok = abs(front.a-.4)<1e-5 && abs(front.g/front.a-.3)<1e-5
+        && abs(rear.a-.8)<1e-5 && abs(rear.g/rear.a-.8)<1e-5
+        && abs(max(front.a,rear.a)-.8)<1e-5;
+    LayeredSampleState continuous = (LayeredSampleState)0;
+    accumulate_layered_sample(.4, 0, .49, 1, 0, continuous);
+    accumulate_layered_sample(.8, 0, .51, 1, 0, continuous);
+    bool continuous_ok = abs(pack_layered_shadow(continuous,0).a-.8)<1e-5
+        && pack_layered_shadow(continuous,1).a==0;
+    LayeredSampleState faded = (LayeredSampleState)0;
+    accumulate_layered_sample(.55, .25, .2, .5, 0, faded);
+    accumulate_layered_sample(0, .25, .5, 1, 0, faded);
+    accumulate_layered_sample(.85, .25, .8, .5, 0, faded);
+    bool fade_ok = abs(pack_layered_shadow(faded,0).a-.2)<1e-5
+        && abs(pack_layered_shadow(faded,1).a-.4)<1e-5;
+    LayeredSampleState opaque = (LayeredSampleState)0;
+    accumulate_layered_sample(1, 0, .2, 1, 0, opaque);
+    accumulate_layered_sample(0, 0, .5, 1, 0, opaque);
+    accumulate_layered_sample(.7, 0, .8, 1, 0, opaque);
+    bool opaque_ok = pack_layered_shadow(opaque,1).a>.69;
+    bool correct = split_ok && continuous_ok && fade_ok && opaque_ok;
+    return correct ? float4(0,1,0,1) : float4(1,0,0,1);
+}`);
+  assert.match(assembly, /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/);
+});
+
 test("Fade sample switches keep blur distance continuous near the shadow root", () => {
   const source = readFileSync(scriptPath, "utf8");
   for (const shaderName of ["direct_raymarch_shadow", "edge_antialias"]) {
