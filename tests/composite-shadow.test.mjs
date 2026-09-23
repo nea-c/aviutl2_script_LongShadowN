@@ -610,12 +610,12 @@ test("distance field is smoothed in both axes before either color blur pass", ()
   );
 });
 
-test("shadow suppression preserves antialiased source opacity", () => {
+test("shadow-backed edges avoid fringes without filling transparent edges", () => {
   const source = readFileSync(scriptPath, "utf8");
   const neutralizeShadow = extractFunction(source, "neutralize_shadow");
   const assembly = compileConstantResult(`
 static const float3 object_rgb = float3(1, 0, 0);
-static const float object_mix = 1;
+static const float object_mix = 0;
 static const float object_opacity = 1;
 ${neutralizeShadow}
 
@@ -626,7 +626,8 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     float4 transparent_shadow = neutralize_shadow(float4(0, 0, 0, 0), original);
     float4 dark_result = original + dark_shadow * (1 - original.a);
     float4 transparent_result = original + transparent_shadow * (1 - original.a);
-    bool correct = all(abs(dark_result - original) < 1e-6)
+    bool correct = abs(dark_result.a - 1) < 1e-6
+        && all(abs(dark_result.rgb - 1) < 1e-6)
         && all(abs(transparent_result - original) < 1e-6);
     return correct
         ? float4(0, 1, 0, 1)
@@ -637,7 +638,7 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
   assert.match(
     assembly,
     /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-    "the shadow turned an antialiased source pixel opaque",
+    "the edge backing either left a fringe or filled an edge without shadow",
   );
 });
 
@@ -684,9 +685,9 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     float4 shadow = neutralize_shadow(float4(0, 0, 0, 1), original);
     float4 styled = color_object(original);
     float4 result = styled + shadow * (1 - styled.a);
-    bool correct = abs(result.r - 0.5) < 1e-6
+    bool correct = abs(result.r - 1) < 1e-6
         && result.g < 1e-6 && result.b < 1e-6
-        && abs(result.a - 0.5) < 1e-6;
+        && abs(result.a - 1) < 1e-6;
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
