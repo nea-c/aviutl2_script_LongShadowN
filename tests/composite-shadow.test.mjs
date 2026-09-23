@@ -443,7 +443,7 @@ test("fade controls expose percent values while shaders receive normalized value
     return match.slice(1).map(Number);
   };
 
-  assert.deepEqual(readTrack("fade_in"), [0, 100, 100]);
+  assert.deepEqual(readTrack("fade_in"), [0, 100, 0]);
   assert.deepEqual(readTrack("fade_out"), [0, 100, 50]);
 
   const directCall = source.match(
@@ -457,10 +457,39 @@ test("fade controls expose percent values while shaders receive normalized value
   const evaluate = (expression, fadeIn, fadeOut) => Function(
     "fade_in", "fade_out", `return ${expression};`,
   )(fadeIn, fadeOut);
-  assert.equal(evaluate(directCall[1], 100, 50), 1);
+  assert.equal(evaluate(directCall[1], 0, 50), 0);
   assert.equal(evaluate(directCall[2], 100, 50), 0.5);
-  assert.equal(evaluate(antialiasCall[1], 100, 50), 1);
+  assert.equal(evaluate(antialiasCall[1], 0, 50), 0);
   assert.equal(evaluate(antialiasCall[2], 100, 50), 0.5);
+});
+
+test("Fade In is off at zero and grows over the shadow as its value rises", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  for (const shaderName of ["direct_raymarch_shadow", "edge_antialias"]) {
+    const shader = source.match(
+      new RegExp(`--\\[\\[pixelshader@${shaderName}:([\\s\\S]*?)\\]\\]`),
+    )?.[1];
+    assert.ok(shader, `${shaderName} shader was not found`);
+    const fade = extractFunction(shader, "fade_weight_sample", "float");
+    for (const [setting, expected] of [[0, 1], [0.5, 0.5], [1, 0.15625]]) {
+      const assembly = compileConstantResult(`
+static const float fade_in = ${setting};
+static const float fade_out = 0;
+${fade}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    bool correct = abs(fade_weight_sample(0.25) - ${expected}) < 1e-6;
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+      assert.match(assembly,
+        /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+        `${shaderName} Fade In ${setting} did not produce ${expected}`);
+    }
+  }
+  const edgeShader = source.match(
+    /--\[\[pixelshader@edge_antialias:([\s\S]*?)\]\]/,
+  )?.[1];
+  assert.match(edgeShader, /fade_in > 0\.0001 \|\| fade_out > 0\.0001/);
 });
 
 test("blur shadow exposes a 4000 px range in 0.1 px steps", () => {
@@ -651,7 +680,7 @@ test("fade is accumulated per ray sample without first-hit discontinuities", () 
     const accumulate = extractFunction(
       shader, "accumulate_faded_shadow_sample", "bool");
     const assembly = compileConstantResult(`
-static const float fade_in = 0;
+static const float fade_in = 1;
 static const float fade_out = 0;
 ${union}
 ${difference}
@@ -784,7 +813,7 @@ test("Fade sample switches keep blur distance continuous near the shadow root", 
       extractFunction(shader, "accumulate_faded_shadow_sample", "bool"),
     ].join("\n");
     const assembly = compileConstantResult(`
-static const float fade_in = 1;
+static const float fade_in = 0;
 static const float fade_out = 0.5;
 ${helpers}
 float2 sample_ray(float near_alpha) {
@@ -953,6 +982,38 @@ test("edge refinement emits per-sample faded coverage in resolved red", () => {
     "refinement did not apply Fade to each correlated ray sample");
   assert.match(shader,
     /float4 contribution\s*=\s*float4\(coverage, weighted_distance,/);
+});
+
+test("Fade Out ray sampling prefilters source AA without altering source compositing", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const filter = source.match(
+    /--\[\[pixelshader@prefilter_shadow_mask:([\s\S]*?)\]\]/,
+  )?.[1];
+  assert.ok(filter, "source AA prefilter shader was not found");
+  assert.match(filter, /int weights\[5\]\s*=\s*\{\s*1,\s*4,\s*6,\s*4,\s*1\s*\}/);
+  assert.match(filter, /weighted_alpha \/ 256/);
+  assert.match(source, /if should_render_shadow and fade_out > 0 then[\s\S]*?obj\.pixelshader\("prefilter_shadow_mask"/);
+  assert.match(source, /shadow_sample_source = "cache:longshadown_shadow_mask"/);
+  assert.match(source, /obj\.pixelshader\("direct_raymarch_shadow"[\s\S]*?shadow_sample_source/);
+  assert.match(source, /obj\.pixelshader\("edge_antialias"[\s\S]*?"cache:longshadown_resolved", shadow_sample_source/);
+  assert.match(source, /obj\.pixelshader\("composite_shadow"[\s\S]*?"cache:longshadown_source"/);
+});
+
+test("Fade Out smooths residual shadow coverage after edge refinement", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@smooth_fade_shadow:([\s\S]*?)\]\]/,
+  )?.[1];
+  assert.ok(shader, "Fade output smoothing shader was not found");
+  assert.match(shader, /int weights\[3\]\s*=\s*\{\s*1,\s*2,\s*1\s*\}/);
+  assert.match(shader, /return sum \/ 16/);
+  const style = source.match(
+    /local function style_and_filter_shadow\([\s\S]*?\r?\nend/,
+  )?.[0];
+  assert.ok(style, "style_and_filter_shadow was not found");
+  assert.match(style, /if fade_out > 0 and blur_shadow == 0 then[\s\S]*?obj\.pixelshader\("smooth_fade_shadow"/);
+  assert.ok(style.indexOf('obj.pixelshader("edge_antialias"')
+    < style.indexOf('obj.pixelshader("smooth_fade_shadow"'));
 });
 
 test("opaque non-edge roots keep the fast path", () => {
