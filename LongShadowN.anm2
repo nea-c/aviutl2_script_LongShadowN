@@ -298,12 +298,20 @@ float reconstruct_extension_coverage(float total_coverage,
     if (uncovered_root <= 1e-6) return 0;
     return saturate((total_coverage - root_coverage) / uncovered_root);
 }
-void accumulate_shadow_coverages(float sample_alpha, float distance,
+float extension_sample_alpha(float sample_alpha, float sample_travel,
+    float quality_step, float current_work_scale) {
+    if (sample_travel <= 1e-6) return 0;
+    float minimum_travel = quality_step > 0 && quality_step < 0.75
+        ? 0.75 / max(current_work_scale, 1) : 0;
+    return sample_travel >= minimum_travel ? sample_alpha : 0;
+}
+void accumulate_shadow_coverages(float sample_alpha, float sample_travel,
+    float quality_step, float current_work_scale,
     inout float total_coverage, inout float extension_coverage) {
     total_coverage += (1 - total_coverage) * sample_alpha;
-    if (distance > 1e-6) {
-        extension_coverage += (1 - extension_coverage) * sample_alpha;
-    }
+    float extension_alpha = extension_sample_alpha(sample_alpha,
+        sample_travel, quality_step, current_work_scale);
+    extension_coverage += (1 - extension_coverage) * extension_alpha;
 }
 float fade_weight_aa(float distance) {
     float root = fade_in >= 0.9999 ? 1
@@ -513,7 +521,8 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
                 first_alpha = sample_alpha;
                 found_source = true;
             }
-            accumulate_shadow_coverages(sample_alpha, distance,
+            accumulate_shadow_coverages(sample_alpha,
+                length(source_pixel - pixel), direct_quality_step, work_scale,
                 coverage, extension_coverage);
             if (coverage >= 0.9999 && extension_coverage >= 0.9999) break;
         }
@@ -605,10 +614,9 @@ cbuffer constant0 : register(b0) {
     float shadow_mix;
     float shadow_type;
     float target_scale;
-    float object_opacity;
 };
 float select_shadow_coverage(float4 shadow_info) {
-    return lerp(shadow_info.r, shadow_info.a, object_opacity);
+    return shadow_info.r;
 }
 float3 mix_shadow_color(float4 source) {
     float3 source_rgb = source.a > 1e-6
@@ -1179,8 +1187,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
               texture_type == 2 and texture_2d_scale_y or 100,
               texture_mapping, texture_w, texture_h, has_texture,
               texture_color_mix / 100, texture_alpha_mix / 100,
-              shadow_mix / 100, shadow_type, target_scale,
-              object_opacity / 100 }, "copy", "loop")
+              shadow_mix / 100, shadow_type, target_scale }, "copy", "loop")
     else
         obj.pixelshader("style_shadow", "cache:longshadown_final",
             { "cache:longshadown_resolved", "cache:longshadown_texture", "cache:longshadown_source_color" },
@@ -1190,8 +1197,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
               texture_type == 2 and texture_2d_scale_y or 100,
               texture_mapping, texture_w, texture_h, has_texture,
               texture_color_mix / 100, texture_alpha_mix / 100,
-              shadow_mix / 100, shadow_type, target_scale,
-              object_opacity / 100 }, "copy", "clamp")
+              shadow_mix / 100, shadow_type, target_scale }, "copy", "clamp")
     end
     if post_smooth then
         obj.clearbuffer("cache:longshadown_filtered", buffer_w, buffer_h)

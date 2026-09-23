@@ -101,15 +101,20 @@ compositing.
 
 ## Styling and Compositing
 
-Let `o` be normalized Object Opacity. Before shadow styling, choose coverage:
+Shadow styling always uses positive-distance extension coverage:
 
-`C = lerp(E, T, o)`
+`C = E`
 
-This preserves the full existing shadow at `o = 1`, uses extension-only
-coverage at `o = 0`, and restores the root contribution continuously between
-them. `style_shadow` uses `C * ShadowOpacity` as its premultiplied alpha before
-Post Smooth or Blur Shadow, so those effects process the selected shadow
-rather than an already-contaminated root silhouette.
+Distance-zero coverage is never restored by Object Opacity. Restoring `T`
+allows the root silhouette to show through the source's antialiased boundary,
+creating a colored outline even when Object Opacity is 100%. `style_shadow`
+uses `E * ShadowOpacity` as its premultiplied alpha before Post Smooth or Blur
+Shadow.
+
+Ultra's first positive sample is closer than High's and can reproduce the
+source AA footprint. Edge refinement therefore excludes Ultra samples below a
+High-equivalent travel distance: 0.75 px at Native scale and 0.375 px at 2x.
+Later Ultra samples retain their 0.5 px sampling density.
 
 The final compositor then uses the original source alpha `a` to cut extension
 from beneath the fading object:
@@ -128,7 +133,7 @@ extension channel supersedes it.
 3. `resolve_shadow` receives the raw data plus the original source texture and
    source bounds, reconstructing total and extension coverage per work sample.
 4. `edge_antialias` preserves or recomputes the new resolved contract.
-5. `style_shadow` receives Object Opacity and styles `lerp(E, T, o)`.
+5. `style_shadow` styles only positive-distance extension coverage `E`.
 6. Existing smoothing and blur operate on that styled result.
 7. `composite_shadow` applies continuous source-overlap attenuation and normal
    premultiplied source-over.
@@ -143,8 +148,8 @@ user parameter, default, saved-project value, or cache-buffer count changes.
 | greater than 0 | 0 | 0 | No colored root outline |
 | 0 | greater than 0 | 0 | Preserve extended shadow |
 | greater than 0 | greater than 0 | 0 | Preserve extension, cut it by continuous source alpha |
-| any | any | between 0 and 1 | Continuously restore root and source contributions |
-| any | any | 1 | Preserve current total shadow and normal source-over |
+| any | any | between 0 and 1 | Keep extension-only shadow and continuously restore the source contribution |
+| any | any | 1 | Keep extension-only shadow and normal source-over |
 | 1 | unobservable | 0 | Fully suppressed by the opaque source cutout |
 
 ## Verification
@@ -156,8 +161,10 @@ Automated tests will verify:
 - 2x supersampling reconstructs each work sample before averaging;
 - a transparent center surrounded by source samples retains positive-distance
   extension rather than being rejected by first-hit distance;
-- `style_shadow` selects extension at Object Opacity zero, total at 100%, and a
-  linear intermediate value at 50%;
+- `style_shadow` selects extension coverage at Object Opacity zero, 50%, and
+  100%, never restoring distance-zero coverage;
+- Ultra excludes its sub-High first sample from extension coverage at Native
+  and 2x scales while High remains unchanged;
 - final overlap attenuation remains continuous for fractional source alpha;
 - the old first-hit rejection is absent;
 - all embedded shaders compile and the full regression suite passes.

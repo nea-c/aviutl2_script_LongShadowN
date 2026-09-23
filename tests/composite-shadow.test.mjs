@@ -667,7 +667,7 @@ test("edge refinement emits extension coverage in resolved red", () => {
     /--\[\[pixelshader@edge_antialias:([\s\S]*?)\]\]/)?.[1];
   assert.ok(shader, "edge_antialias shader was not found");
   assert.match(shader,
-    /accumulate_shadow_coverages\(\s*sample_alpha,\s*distance,\s*coverage,\s*extension_coverage\s*\)/,
+    /accumulate_shadow_coverages\(\s*sample_alpha,\s*length\(source_pixel - pixel\),\s*direct_quality_step,\s*work_scale,\s*coverage,\s*extension_coverage\s*\)/,
     "edge refinement did not accumulate positive-distance coverage independently");
   assert.match(shader,
     /float4 contribution\s*=\s*float4\(extension_coverage \* weight,/);
@@ -685,13 +685,16 @@ test("opaque roots force independent positive-distance refinement", () => {
 
   const accumulate = extractFunction(
     source, "accumulate_shadow_coverages", "void");
+  const extensionSample = extractFunction(
+    source, "extension_sample_alpha", "float");
   const assembly = compileConstantResult(`
+${extensionSample}
 ${accumulate}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
     float total = 0;
     float extension = 0;
-    accumulate_shadow_coverages(1, 0, total, extension);
-    accumulate_shadow_coverages(1, 0.5, total, extension);
+    accumulate_shadow_coverages(1, 0, 0.5, 1, total, extension);
+    accumulate_shadow_coverages(1, 1, 0.5, 1, total, extension);
     bool correct = abs(total - 1) < 1e-6 && abs(extension - 1) < 1e-6;
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
@@ -701,38 +704,47 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     "opaque root coverage discarded its positive-distance extension");
 });
 
-test("Object Opacity selects extension before shadow styling", () => {
+test("extension coverage begins at the High-equivalent travel distance", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const extensionSample = extractFunction(
+    source, "extension_sample_alpha", "float");
+  const assembly = compileConstantResult(`
+${extensionSample}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    bool roots_excluded = extension_sample_alpha(0.8, 0, 0.5, 1) == 0
+        && extension_sample_alpha(0.8, 0, 1, 1) == 0
+        && extension_sample_alpha(0.8, 0, 2, 1) == 0;
+    bool native_ultra = extension_sample_alpha(0.8, 0.5, 0.5, 1) == 0
+        && abs(extension_sample_alpha(0.8, 1, 0.5, 1) - 0.8) < 1e-6;
+    bool supersampled_ultra = extension_sample_alpha(0.8, 0.25, 0.5, 2) == 0
+        && abs(extension_sample_alpha(0.8, 0.5, 0.5, 2) - 0.8) < 1e-6;
+    bool high_unchanged = abs(extension_sample_alpha(0.8, 1, 1, 1) - 0.8) < 1e-6;
+    return roots_excluded && native_ultra && supersampled_ultra && high_unchanged
+        ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+  assert.match(assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+    "sub-High Ultra samples leaked into extension coverage");
+});
+
+test("Object Opacity never restores distance-zero shadow coverage", () => {
   const source = readFileSync(scriptPath, "utf8");
   const selectCoverage = extractFunction(
     source, "select_shadow_coverage", "float");
-  const cases = [["0", "0.4"], ["0.5", "0.6"], ["1", "0.8"]];
-  for (const [opacity, expected] of cases) {
+  for (const opacity of ["0", "0.5", "1"]) {
     const assembly = compileConstantResult(`
 static const float object_opacity = ${opacity};
 ${selectCoverage}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
     float result = select_shadow_coverage(float4(0.4, 0.2, 1, 0.8));
-    bool correct = abs(result - ${expected}) < 1e-6;
+    bool correct = abs(result - 0.4) < 1e-6;
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
     assert.match(assembly,
       /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
       `Object Opacity ${opacity}`);
-  }
-});
-
-test("style shadow receives normalized Object Opacity before filtering", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const calls = [...source.matchAll(
-    /obj\.pixelshader\("style_shadow"[\s\S]*?shadow_mix \/ 100, shadow_type, target_scale,\s*([^}]+)\}, "copy", "(?:loop|clamp)"\)/g,
-  )];
-  assert.equal(calls.length, 2);
-  for (const call of calls) {
-    const normalized = Function(
-      "object_opacity", `return ${call[1]};`,
-    )(50);
-    assert.equal(normalized, 0.5);
   }
 });
 

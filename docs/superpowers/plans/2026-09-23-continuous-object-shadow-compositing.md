@@ -4,7 +4,7 @@
 
 **Goal:** Remove the colored distance-zero outline at Object Opacity zero while retaining antialiased positive-distance shadow extension, including inside glyph holes.
 
-**Architecture:** Resolve total Direct coverage and reconstructed positive-distance extension coverage into separate channels of the existing metadata texture. Select between extension and total coverage before styling and blur according to Object Opacity, then apply the original source alpha only as a continuous final overlap cutout.
+**Architecture:** Resolve total Direct coverage and reconstructed positive-distance extension coverage into separate channels of the existing metadata texture. Style only positive-distance extension coverage, then apply the original source alpha only as a continuous final overlap cutout.
 
 **Tech Stack:** AviUtl2 `.anm2` Lua script, embedded HLSL pixel shaders, Node.js `node:test`, Microsoft FXC Shader Model 5 compiler.
 
@@ -17,7 +17,7 @@
 - Keep Direct raw source-coordinate packing consumed by `resolve_source_color` unchanged.
 - Reconstruct 2x supersampling extension coverage per raw work sample before averaging.
 - Store faded positive-distance extension coverage in resolved `.r` and faded total coverage in resolved `.a`.
-- Select extension-versus-total coverage before Post Smooth and Blur Shadow.
+- Select extension-only coverage before Post Smooth and Blur Shadow.
 - Keep premultiplied RGBA through styling and final source-over.
 - Remove final first-hit-distance rejection; an explicit extension channel replaces it.
 
@@ -26,8 +26,28 @@
 - A root-only antialiased pixel must reconstruct zero extension instead of producing an exterior colored outline; Task 1 Step 1 includes `T = R = 0.4375`.
 - A zero-first-hit pixel with later ray coverage must retain extension; Task 1 Step 1 includes `R = 0.4375`, `E = 0.8`, and `T = 0.8875`.
 - 2x supersampling must reconstruct each of four nonlinear samples before averaging; Task 1 Step 1 checks operation ordering inside `resolve_shadow`.
-- Object Opacity 0, 50, and 100 must select extension, midpoint, and total coverage before blur; Task 2 Step 1 compiles all three endpoints.
+- Object Opacity 0, 50, and 100 must all select extension-only coverage before blur.
 - Fractional source alpha and partially transparent shadow must remain proportional after the final overlap cutout; Task 2 Step 1 compiles full composition at opacity 0 and 0.5.
+
+---
+
+## Post-integration outline correction
+
+Manual comparison found two remaining root-outline paths. Object Opacity 100%
+restored total coverage and exposed distance-zero color through source AA at
+every quality. Ultra also classified its first 0.5 px sample as extension,
+reproducing the source AA footprint at Object Opacity 0%.
+
+The final contract supersedes Task 2's original opacity interpolation:
+
+- `style_shadow` always consumes resolved `.r` extension coverage and no longer
+  receives Object Opacity;
+- distance-zero total coverage `.a` remains metadata only and is never restored
+  for styling;
+- Ultra refinement excludes samples below the High-equivalent travel threshold
+  while retaining later 0.5 px samples;
+- final compositing continues to apply Object Opacity and continuous overlap
+  attenuation.
 
 ---
 
