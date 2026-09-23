@@ -837,24 +837,14 @@ float4 color_object(float4 source) {
     float3 rgb = lerp(straight_rgb, object_rgb, object_mix);
     return float4(rgb * alpha, alpha);
 }
-float4 remove_unextended_shadow(float4 shadow, float4 source, float4 shadow_info) {
-    if (source.a > 1e-6 || shadow_info.a <= 1e-6) return shadow;
-    float distance = saturate(shadow_info.g / shadow_info.a);
-    return distance <= 1e-6 ? 0 : shadow;
-}
-float4 neutralize_shadow(float4 shadow, float4 source) {
-    float source_support = saturate(source.a * 255);
-    if (source_support <= 0 || shadow.a <= 1e-6) return shadow;
-    // Back antialiased source pixels only where the styled shadow exists.
-    // This prevents a fringe without filling otherwise transparent edges.
-    float object_alpha = source.a * object_opacity;
-    float reinforced_alpha = shadow.a * object_opacity;
-    float backing_alpha = saturate((reinforced_alpha - object_alpha)
-        / max(1 - object_alpha, 1e-6));
-    float3 straight_rgb = source.rgb / max(source.a, 1e-6);
-    float3 rgb = lerp(straight_rgb, object_rgb, object_mix);
-    float4 backing = float4(rgb * backing_alpha, backing_alpha);
-    return lerp(shadow, backing, source_support);
+float4 prepare_shadow_for_object(float4 shadow, float4 source,
+    float4 shadow_info) {
+    if (shadow_info.a > 1e-6 && source.a <= 1e-6) {
+        float distance = saturate(shadow_info.g / shadow_info.a);
+        if (distance <= 1e-6) return 0;
+    }
+    float overlap_weight = 1 - source.a * (1 - object_opacity);
+    return shadow * overlap_weight;
 }
 float4 composite_shadow(float4 pos : SV_Position) : SV_Target {
     float4 shadow = shadow_texture[int2(pos.xy)];
@@ -864,8 +854,7 @@ float4 composite_shadow(float4 pos : SV_Position) : SV_Target {
     if (all(source_pos >= 0) && all(source_pos < int2(source_size))) {
         source_sample = source_texture[source_pos];
     }
-    shadow = remove_unextended_shadow(shadow, source_sample, shadow_info);
-    shadow = neutralize_shadow(shadow, source_sample);
+    shadow = prepare_shadow_for_object(shadow, source_sample, shadow_info);
     float4 source = color_object(source_sample);
     return source + shadow * (1 - source.a);
 }

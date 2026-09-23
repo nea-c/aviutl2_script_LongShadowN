@@ -610,123 +610,135 @@ test("distance field is smoothed in both axes before either color blur pass", ()
   );
 });
 
-test("zero-distance Direct coverage is hidden outside the source", () => {
+test("only exact unextended coverage is hidden outside the source", () => {
   const source = readFileSync(scriptPath, "utf8");
-  const removeUnextendedShadow = extractFunction(source, "remove_unextended_shadow");
+  const prepareShadow = extractFunction(source, "prepare_shadow_for_object");
   const assembly = compileConstantResult(`
-${removeUnextendedShadow}
+static const float object_opacity = 1;
+${prepareShadow}
 
 float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float4 shadow = float4(0.25, 0.5, 0.75, 0.5);
+    float4 shadow = float4(0, 0, 0.5, 0.5);
     float4 transparent_source = 0;
-    float4 supported_source = float4(0.25, 0.25, 0.25, 0.25);
     float4 root_info = float4(0.25, 0, 1, 0.5);
-    float4 extended_info = float4(0.25, 0.125, 1, 0.5);
-    float4 removed = remove_unextended_shadow(
+    float4 near_info = float4(0.25, 0.000005, 1, 0.5);
+    float4 removed = prepare_shadow_for_object(
         shadow, transparent_source, root_info);
-    float4 extended = remove_unextended_shadow(
-        shadow, transparent_source, extended_info);
-    float4 source_backed = remove_unextended_shadow(
-        shadow, supported_source, root_info);
+    float4 retained = prepare_shadow_for_object(
+        shadow, transparent_source, near_info);
     bool correct = all(abs(removed) < 1e-6)
-        && all(abs(extended - shadow) < 1e-6)
-        && all(abs(source_backed - shadow) < 1e-6);
+        && all(abs(retained - shadow) < 1e-6);
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
-
-  assert.match(
-    assembly,
+  assert.match(assembly,
     /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-    "zero-distance coverage leaked outside the source or removed extended shadow",
-  );
+    "root rejection removed positive-distance extension or retained distance zero");
 });
 
-test("shadow-backed edges avoid fringes without filling transparent edges", () => {
+test("shadow overlap preserves continuous source antialiasing", () => {
   const source = readFileSync(scriptPath, "utf8");
-  const neutralizeShadow = extractFunction(source, "neutralize_shadow");
+  const colorObject = extractFunction(source, "color_object");
+  const prepareShadow = extractFunction(source, "prepare_shadow_for_object");
   const assembly = compileConstantResult(`
 static const float3 object_rgb = float3(1, 0, 0);
 static const float object_mix = 0;
 static const float object_opacity = 1;
-${neutralizeShadow}
-
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float edge_alpha = 1.0 / 255;
-    float4 original = float4(edge_alpha, edge_alpha, edge_alpha, edge_alpha);
-    float4 dark_shadow = neutralize_shadow(float4(0, 0, 0, 1), original);
-    float4 transparent_shadow = neutralize_shadow(float4(0, 0, 0, 0), original);
-    float4 dark_result = original + dark_shadow * (1 - original.a);
-    float4 transparent_result = original + transparent_shadow * (1 - original.a);
-    bool correct = abs(dark_result.a - 1) < 1e-6
-        && all(abs(dark_result.rgb - 1) < 1e-6)
-        && all(abs(transparent_result - original) < 1e-6);
-    return correct
-        ? float4(0, 1, 0, 1)
-        : float4(1, 0, 0, 1);
-}
-`);
-
-  assert.match(
-    assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-    "the edge backing either left a fringe or filled an edge without shadow",
-  );
-});
-
-test("object opacity can fully hide the source over its shadow", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const colorObject = extractFunction(source, "color_object");
-  const neutralizeShadow = extractFunction(source, "neutralize_shadow");
-  const assembly = compileConstantResult(`
-static const float3 object_rgb = float3(1, 0, 0);
-static const float object_mix = 1;
-static const float object_opacity = 0;
 ${colorObject}
-${neutralizeShadow}
+${prepareShadow}
 
 float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float4 original = float4(0.25, 0.25, 0.25, 0.5);
-    float4 shadow = neutralize_shadow(float4(0, 0, 0, 1), original);
+    float4 original = float4(0.5, 0.5, 0.5, 0.5);
+    float4 blue_shadow = float4(0, 0, 1, 1);
+    float4 info = float4(0.25, 0.25, 1, 1);
+    float4 shadow = prepare_shadow_for_object(blue_shadow, original, info);
     float4 styled = color_object(original);
     float4 result = styled + shadow * (1 - styled.a);
-    return result.a < 1e-6 ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+    float4 no_shadow = prepare_shadow_for_object(
+        float4(0, 0, 0, 0), original, float4(0, 0, 0, 0));
+    float4 transparent_result = styled + no_shadow * (1 - styled.a);
+    bool correct = all(abs(result - float4(0.5, 0.5, 1, 1)) < 1e-6)
+        && all(abs(transparent_result - original) < 1e-6);
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
-
-  assert.match(
-    assembly,
+  assert.match(assembly,
     /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-    "shadow coverage substituted for the source after Object::Opacity reached zero",
-  );
+    "source edge was normalized to an opaque object-colored backing");
 });
 
-test("object mix is not diluted by the original-colored shadow", () => {
+test("Object Opacity attenuates overlap with continuous source coverage", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const prepareShadow = extractFunction(source, "prepare_shadow_for_object");
+  const cases = [
+    {
+      name: "zero opacity and full source",
+      opacity: "0",
+      sourceValue: "float4(1, 1, 1, 1)",
+      expected: "float4(0, 0, 0, 0)",
+    },
+    {
+      name: "zero opacity and half source",
+      opacity: "0",
+      sourceValue: "float4(0.5, 0.5, 0.5, 0.5)",
+      expected: "float4(0, 0, 0.25, 0.25)",
+    },
+    {
+      name: "half opacity and half source",
+      opacity: "0.5",
+      sourceValue: "float4(0.5, 0.5, 0.5, 0.5)",
+      expected: "float4(0, 0, 0.375, 0.375)",
+    },
+    {
+      name: "full opacity and sub-byte source",
+      opacity: "1",
+      sourceValue: "float4(1.0 / 1024, 1.0 / 1024, 1.0 / 1024, 1.0 / 1024)",
+      expected: "float4(0, 0, 0.5, 0.5)",
+    },
+  ];
+  for (const testCase of cases) {
+    const assembly = compileConstantResult(`
+static const float object_opacity = ${testCase.opacity};
+${prepareShadow}
+
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float4 shadow = float4(0, 0, 0.5, 0.5);
+    float4 source_sample = ${testCase.sourceValue};
+    float4 info = float4(0.25, 0.125, 1, 0.5);
+    float4 result = prepare_shadow_for_object(shadow, source_sample, info);
+    bool correct = all(abs(result - ${testCase.expected}) < 1e-6);
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+    assert.match(assembly,
+      /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+      testCase.name);
+  }
+});
+
+test("Object Mix recolors only the antialiased source contribution", () => {
   const source = readFileSync(scriptPath, "utf8");
   const colorObject = extractFunction(source, "color_object");
-  const neutralizeShadow = extractFunction(source, "neutralize_shadow");
+  const prepareShadow = extractFunction(source, "prepare_shadow_for_object");
   const assembly = compileConstantResult(`
 static const float3 object_rgb = float3(1, 0, 0);
 static const float object_mix = 1;
 static const float object_opacity = 1;
 ${colorObject}
-${neutralizeShadow}
+${prepareShadow}
 
 float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float4 original = float4(0.25, 0.25, 0.25, 0.5);
-    float4 shadow = neutralize_shadow(float4(0, 0, 0, 1), original);
+    float4 original = float4(0.5, 0.5, 0.5, 0.5);
+    float4 blue_shadow = float4(0, 0, 1, 1);
+    float4 info = float4(0.25, 0.25, 1, 1);
+    float4 prepared = prepare_shadow_for_object(blue_shadow, original, info);
     float4 styled = color_object(original);
-    float4 result = styled + shadow * (1 - styled.a);
-    bool correct = abs(result.r - 1) < 1e-6
-        && result.g < 1e-6 && result.b < 1e-6
-        && abs(result.a - 1) < 1e-6;
+    float4 result = styled + prepared * (1 - styled.a);
+    bool correct = all(abs(result - float4(0.5, 0, 0.5, 1)) < 1e-6);
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
-
-  assert.match(
-    assembly,
+  assert.match(assembly,
     /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-    "the original-colored shadow changed the mixed object's color or alpha",
-  );
+    "Object Mix normalized a partial edge or recolored the background shadow");
 });
