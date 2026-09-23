@@ -66,6 +66,67 @@ test("all embedded pixel shaders compile", () => {
   }
 });
 
+test("direct interval helpers clip directional radial and inverse rays", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const clipAxis = extractFunction(source, "clip_parameter_axis", "bool");
+  const finishInterval = extractFunction(source, "finish_clipped_interval", "bool");
+  const directional = extractFunction(source, "directional_ray_interval", "bool");
+  const projection = extractFunction(source, "projection_ray_interval", "bool");
+  const distanceFromU = extractFunction(source, "projection_distance_from_u", "float");
+  const assembly = compileConstantResult(`
+${clipAxis}
+${finishInterval}
+${directional}
+${projection}
+${distanceFromU}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float ds, de, dspan;
+    bool dh = directional_ray_interval(float2(3, .5), float2(1, 0), 4,
+        float2(0, 0), float2(1, 1), ds, de, dspan);
+    float ms, me, mspan;
+    bool dm = directional_ray_interval(float2(3, 2), float2(1, 0), 4,
+        float2(0, 0), float2(1, 1), ms, me, mspan);
+    float is, ie, ispan;
+    bool ih = projection_ray_interval(float2(.5, 0), float2(0, 0), .25,
+        float2(-1, -1), float2(1, 1), is, ie, ispan);
+    float rs, re, rspan;
+    bool rh = projection_ray_interval(float2(.5, 0), float2(0, 0), 2,
+        float2(.3, -1), float2(.4, 1), rs, re, rspan);
+    float near_distance = projection_distance_from_u(1.0000001, .99999995);
+    bool correct = dh && !dm && ds >= .5 && ds < .5001
+        && abs(de - .75) < 1e-4 && abs(dspan - 1) < 1e-4
+        && ih && is < ie && abs(ispan - .5) < 1e-3
+        && rh && rs > re && abs(rspan - .1) < 1e-3
+        && isfinite(near_distance) && near_distance >= 0 && near_distance <= 1;
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+  assert.match(
+    assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+  );
+});
+
+test("direct sampling includes both endpoints when capped", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const sampleParameter = extractFunction(source, "direct_sample_parameter", "float");
+  const assembly = compileConstantResult(`
+${sampleParameter}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float first = direct_sample_parameter(3, 9003, 0, 8001);
+    float penultimate = direct_sample_parameter(3, 9003, 7999, 8001);
+    float last = direct_sample_parameter(3, 9003, 8000, 8001);
+    bool correct = first == 3 && last == 9003
+        && penultimate < last && abs((last - first) / 8000 - 1.125) < 1e-6;
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+  assert.match(
+    assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+  );
+});
+
 test("inverse ray interval clips sampling to the source rectangle", () => {
   const source = readFileSync(scriptPath, "utf8");
   const intervalFunction = extractFunction(source, "inverse_ray_interval", "bool");
