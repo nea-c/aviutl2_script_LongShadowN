@@ -186,6 +186,21 @@ bool inverse_ray_interval(float2 pixel, float2 origin,
     float inset_u = (maximum_u - minimum_u) * 1e-5;
     if (any(origin + delta * minimum_u >= bounds_max)) minimum_u += inset_u;
     if (any(origin + delta * maximum_u >= bounds_max)) maximum_u -= inset_u;
+    float2 first_point = origin + delta * minimum_u;
+    float2 last_point = origin + delta * maximum_u;
+    bool first_outside = any(first_point < bounds_min)
+        || any(first_point >= bounds_max);
+    bool last_outside = any(last_point < bounds_min)
+        || any(last_point >= bounds_max);
+    if (first_outside || last_outside) {
+        // The relative inset may round away in float32; use an interior point.
+        if (maximum_u <= minimum_u) return false;
+        float midpoint_u = minimum_u + (maximum_u - minimum_u) * 0.5;
+        float2 midpoint = origin + delta * midpoint_u;
+        if (any(midpoint < bounds_min) || any(midpoint >= bounds_max)) return false;
+        if (first_outside) minimum_u = midpoint_u;
+        if (last_outside) maximum_u = midpoint_u;
+    }
 
     float logarithmic_range = max(-log(safe_scale), 1e-6);
     start_distance = saturate(log(max(minimum_u, 1)) / logarithmic_range);
