@@ -66,6 +66,42 @@ test("all embedded pixel shaders compile", () => {
   }
 });
 
+test("inverse ray interval clips sampling to the source rectangle", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const intervalFunction = extractFunction(source, "inverse_ray_interval", "bool");
+  const assembly = compileConstantResult(`
+${intervalFunction}
+
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float start_distance, end_distance, source_span;
+    bool hit = inverse_ray_interval(
+        float2(0.5, 0), float2(0, 0), float2(-1, -1), float2(1, 1),
+        0.25, start_distance, end_distance, source_span);
+    bool clipped = hit
+        && abs(start_distance - 0) < 1e-5
+        && abs(end_distance - 0.5) < 1e-5
+        && abs(source_span - 0.5) < 1e-5;
+
+    float miss_start, miss_end, miss_span;
+    bool miss = inverse_ray_interval(
+        float2(2, 0), float2(0, 0), float2(-2, -1), float2(-1, 1),
+        0.25, miss_start, miss_end, miss_span);
+
+    float parallel_start, parallel_end, parallel_span;
+    bool parallel = inverse_ray_interval(
+        float2(0, 0.5), float2(0, 0), float2(-1, -1), float2(1, 1),
+        0.25, parallel_start, parallel_end, parallel_span);
+
+    bool correct = clipped && !miss && parallel;
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+  assert.match(
+    assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+  );
+});
+
 test("fade controls expose percent values while shaders receive normalized values", () => {
   const source = readFileSync(scriptPath, "utf8");
   const readTrack = (name) => {

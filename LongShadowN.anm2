@@ -154,6 +154,41 @@ float sample_source_alpha_ultra(float2 pixel) {
     return saturate(source_texture.SampleLevel(linear_sampler,
         local / source_size, 0).a);
 }
+bool inverse_ray_interval(float2 pixel, float2 origin,
+    float2 bounds_min, float2 bounds_max, float target_scale,
+    out float start_distance, out float end_distance, out float source_span) {
+    start_distance = 0;
+    end_distance = 0;
+    source_span = 0;
+    float safe_scale = max(target_scale, 1e-6);
+    float maximum_u = 1 / safe_scale;
+    float minimum_u = 1;
+    float2 delta = pixel - origin;
+
+    if (abs(delta.x) < 1e-6) {
+        if (origin.x < bounds_min.x || origin.x >= bounds_max.x) return false;
+    } else {
+        float x0 = (bounds_min.x - origin.x) / delta.x;
+        float x1 = (bounds_max.x - origin.x) / delta.x;
+        minimum_u = max(minimum_u, min(x0, x1));
+        maximum_u = min(maximum_u, max(x0, x1));
+    }
+    if (abs(delta.y) < 1e-6) {
+        if (origin.y < bounds_min.y || origin.y >= bounds_max.y) return false;
+    } else {
+        float y0 = (bounds_min.y - origin.y) / delta.y;
+        float y1 = (bounds_max.y - origin.y) / delta.y;
+        minimum_u = max(minimum_u, min(y0, y1));
+        maximum_u = min(maximum_u, max(y0, y1));
+    }
+    if (maximum_u < minimum_u) return false;
+
+    float logarithmic_range = max(-log(safe_scale), 1e-6);
+    start_distance = saturate(log(max(minimum_u, 1)) / logarithmic_range);
+    end_distance = saturate(log(max(maximum_u, 1)) / logarithmic_range);
+    source_span = length(delta) * max(maximum_u - minimum_u, 0);
+    return end_distance >= start_distance;
+}
 float4 raymarch_shadow(float4 pos : SV_Position) : SV_Target {
     float2 pixel = pos.xy / work_scale;
     float active_sample_count = sample_count;
