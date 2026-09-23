@@ -429,7 +429,7 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
   );
 
-  assert.match(shader[1], /shadow_type >= 1\.5[\s\S]*?inverse_ray_interval/);
+  assert.match(shader[1], /shadow_type >= 1\.5 && inverse_quality_step > 0[\s\S]*?inverse_ray_interval/);
   assert.match(
     shader[1],
     /ceil\(source_span \* work_scale \/ inverse_quality_step\) \+ 1/,
@@ -446,7 +446,7 @@ test("clipped inverse refinement preserves directional radial and Lua contracts"
   );
   assert.ok(shader, "edge_antialias shader was not found");
   assert.match(shader[1], /float dense_refine;\s*float inverse_quality_step;\s*float work_scale;/);
-  assert.match(shader[1], /if \(shadow_type < 0\.5\) \{\s*source_pixel = pixel\s*- direction \* \(distance \* total_length\);\s*\} else if \(shadow_type < 1\.5\) \{/);
+  assert.match(shader[1], /if \(shadow_type < 0\.5\) \{\s*source_pixel = pixel\s*- direction \* \(distance \* total_length\);\s*\} else \{/);
   assert.match(shader[1], /float projection_scale = pow\(max\(target_scale, 1e-6\), distance\);\s*source_pixel = projection_origin\s*\+ \(pixel - projection_origin\) \/ projection_scale;/);
 
   const styleFunction = source.match(
@@ -455,6 +455,35 @@ test("clipped inverse refinement preserves directional radial and Lua contracts"
   assert.ok(styleFunction, "style_and_filter_shadow was not found");
   assert.match(styleFunction[0], /target_scale, refine_sample_count, refine_samples, inverse_quality_step\)/);
   assert.match(styleFunction[0], /fade_in \/ 100, fade_out \/ 100, effective_quality >= 2 and 1 or 0,\s*inverse_quality_step, work_scale \}, "copy", "clamp"\)/);
+});
+
+test("inverse refinement sentinel keeps Ultra on the legacy edge path", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@edge_antialias:\s*([\s\S]*?)\]\]/,
+  );
+  assert.ok(shader, "edge_antialias shader was not found");
+  const edgeBody = extractFunction(shader[1], "edge_antialias");
+  const directConditions = edgeBody.match(
+    /shadow_type >= 1\.5 && inverse_quality_step > 0/g,
+  ) ?? [];
+  assert.equal(directConditions.length, 2);
+  assert.match(edgeBody, /if \(shadow_type >= 1\.5 && inverse_quality_step > 0\) \{[\s\S]*?inverse_ray_interval/);
+  assert.match(edgeBody, /\} else \{\s*if \(sample >= active_sample_count\) break;[\s\S]*?if \(shadow_type < 0\.5\) \{\s*source_pixel = pixel\s*- direction \* \(distance \* total_length\);\s*\} else \{\s*float projection_scale = pow\(max\(target_scale, 1e-6\), distance\);\s*source_pixel = projection_origin\s*\+ \(pixel - projection_origin\) \/ projection_scale;/);
+
+  const styleFunction = source.match(
+    /local function style_and_filter_shadow\([\s\S]*?\r?\nend/,
+  );
+  assert.ok(styleFunction, "style_and_filter_shadow was not found");
+  assert.match(styleFunction[0], /inverse_quality_step = inverse_quality_step or 0/);
+
+  const dispatch = source.match(
+    /if should_render_shadow then[\s\S]*?\r?\nelse/,
+  );
+  assert.ok(dispatch, "shadow renderer dispatch was not found");
+  assert.match(dispatch[0], /local inverse_quality_step\s*\r?\n/);
+  assert.doesNotMatch(dispatch[0], /local inverse_quality_step = 1/);
+  assert.match(dispatch[0], /target_scale, refine_sample_count, inverse_quality_step = render_inverse_direct/);
 });
 
 test("inverse direct dispatch keeps Ultra Directional and Radial paths unchanged", () => {

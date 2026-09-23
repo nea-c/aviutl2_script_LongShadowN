@@ -555,7 +555,7 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
         float start_distance = 0;
         float end_distance = 1;
         float source_span = 0;
-        if (shadow_type >= 1.5) {
+        if (shadow_type >= 1.5 && inverse_quality_step > 0) {
             if (!inverse_ray_interval(pixel, projection_origin, source_offset,
                     source_offset + source_size, target_scale,
                     start_distance, end_distance, source_span)) continue;
@@ -572,7 +572,7 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
         for (int sample = 0; sample < 8001; ++sample) {
             float distance = 1;
             float2 source_pixel = 0;
-            if (shadow_type >= 1.5) {
+            if (shadow_type >= 1.5 && inverse_quality_step > 0) {
                 if (sample >= active_samples) break;
                 float sample_u = inverse_sample_u(start_distance, end_distance,
                     target_scale, sample, active_samples);
@@ -586,7 +586,7 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
                 if (shadow_type < 0.5) {
                     source_pixel = pixel
                         - direction * (distance * total_length);
-                } else if (shadow_type < 1.5) {
+                } else {
                     float projection_scale = pow(max(target_scale, 1e-6), distance);
                     source_pixel = projection_origin
                         + (pixel - projection_origin) / projection_scale;
@@ -1389,6 +1389,7 @@ end
 
 local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
     target_scale, refine_sample_count, refine_samples, inverse_quality_step)
+    inverse_quality_step = inverse_quality_step or 0
     local red = math.floor(shadow_color / 65536) % 256 / 255
     local green = math.floor(shadow_color / 256) % 256 / 255
     local blue = shadow_color % 256 / 255
@@ -1477,7 +1478,7 @@ local work_w, work_h = obj.w * work_scale, obj.h * work_scale
 if should_render_shadow then
     local target_scale = 1
     local refine_sample_count
-    local inverse_quality_step = 1
+    local inverse_quality_step
     local _, refine_samples = get_quality_config(effective_quality)
     if effective_quality == 3 then
         target_scale, refine_sample_count = render_ultra_raymarch(
