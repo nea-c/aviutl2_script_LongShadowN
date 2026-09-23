@@ -45,7 +45,10 @@ The alternatives were rejected as follows:
 - First-hit distance alone is insufficient because zero and positive-distance
   contributions can coexist in one pixel.
 
-No second raymarch or new cache buffer is added.
+No new cache buffer is added. Pixels whose distance-zero source sample is
+fully opaque are conditionally re-raymarched by the existing edge-refinement
+pass, because their positive-distance contribution cannot be recovered from
+combined coverage.
 
 ## Coverage Reconstruction
 
@@ -63,9 +66,10 @@ Therefore resolve reconstructs:
 
 `E = saturate((T - R) / max(1 - R, epsilon))`
 
-When `R` is effectively one, `E` is not observable from `T`; resolve stores
-zero. This is safe because a fully opaque source suppresses that location at
-Object Opacity zero and covers it through source-over at nonzero opacity.
+When `R` is effectively one, `E` is not observable from `T`. Storing zero is
+not safe: reducing Object Opacity exposes that extension, and Blur Shadow can
+spread it beyond the opaque root. Such pixels therefore enter edge refinement,
+which accumulates positive-distance samples independently from total coverage.
 
 For 2x supersampling, reconstruction occurs independently for all four raw
 work samples before averaging. Averaging `T` and `R` first would not preserve
@@ -85,12 +89,13 @@ contract is created, so its encoded source coordinates remain unchanged.
 ## Edge Refinement
 
 `edge_antialias` must emit the same resolved contract. For every refined
-subpixel it already recomputes total Direct coverage from the source. It will
-also sample the root alpha at the subpixel position, reconstruct extension
-coverage with the same equation, apply fade, and accumulate extension into the
-red channel.
+subpixel it recomputes total Direct coverage from the source and independently
+accumulates samples whose normalized distance is greater than zero. It applies
+fade and stores that extension in the red channel.
 
-The fast non-edge path returns the resolved center unchanged. Thus both paths
+The fast non-edge path returns the resolved center unchanged unless the root is
+fully opaque. Opaque roots force refinement even away from geometric edges so
+hidden positive-distance coverage survives styling and blur. Both paths thus
 provide identical channel meanings to styling, blur metadata, and final
 compositing.
 

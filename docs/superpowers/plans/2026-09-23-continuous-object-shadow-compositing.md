@@ -44,6 +44,12 @@
 - Produces: `float reconstruct_extension_coverage(float total_coverage, float root_coverage)` and resolved metadata `{ extension * fade, distance * total * fade, geometry, total * fade }`.
 - Preserves: raw `.rb` source-coordinate encoding before resolve and the existing resolved `.g`, `.b`, and `.a` meanings.
 
+**Final-review correction:** `T` and `R` cannot recover `E` when `R = 1`.
+The existing edge-refinement raymarch must independently accumulate
+positive-distance samples for refined pixels, and fully opaque roots must force
+that path. The resolve cbuffer also needs an explicit scalar padding slot
+between `source_offset` and `source_size` to match Lua's flat constant array.
+
 - [ ] **Step 1: Add failing extension-reconstruction and resolved-contract tests**
 
 Add this constant-folded HLSL test to `tests/composite-shadow.test.mjs`:

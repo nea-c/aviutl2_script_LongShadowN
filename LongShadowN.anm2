@@ -298,6 +298,13 @@ float reconstruct_extension_coverage(float total_coverage,
     if (uncovered_root <= 1e-6) return 0;
     return saturate((total_coverage - root_coverage) / uncovered_root);
 }
+void accumulate_shadow_coverages(float sample_alpha, float distance,
+    inout float total_coverage, inout float extension_coverage) {
+    total_coverage += (1 - total_coverage) * sample_alpha;
+    if (distance > 1e-6) {
+        extension_coverage += (1 - extension_coverage) * sample_alpha;
+    }
+}
 float fade_weight_aa(float distance) {
     float root = fade_in >= 0.9999 ? 1
         : smoothstep(0, max(1 - fade_in, 1e-6), distance);
@@ -434,7 +441,12 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
     bool fade_edge = dense_refine >= 0.5
         && (fade_in < 0.9999 || fade_out > 0.0001)
         && max_distance - min_distance > 0.5 / max(sample_count - 1, 1);
-    if (!geometry_edge && !fade_edge) return center;
+    // Total coverage cannot reveal extension hidden beneath a fully opaque
+    // distance-zero sample. Re-raymarch those pixels so Object Opacity and
+    // blur retain the genuine positive-distance shadow.
+    bool opaque_root_requires_refine = sample_source_alpha(pos.xy) >= 0.9999
+        && center.a > 0.0001;
+    if (!geometry_edge && !fade_edge && !opaque_root_requires_refine) return center;
 
     // The fast compositor only locates the boundary. Re-evaluate boundary
     // subpixels from the original source so intermediate resampling cannot
@@ -444,8 +456,8 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
     for (int i = 0; i < 16; ++i) {
         if (i >= refine_samples) break;
         float2 pixel = pos.xy + refine_offset(i);
-        float root_alpha = sample_source_alpha(pixel);
         float coverage = 0;
+        float extension_coverage = 0;
         float first_distance = 1;
         float first_alpha = 0;
         bool found_source = false;
@@ -501,11 +513,10 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
                 first_alpha = sample_alpha;
                 found_source = true;
             }
-            coverage += (1 - coverage) * sample_alpha;
-            if (coverage >= 0.9999) break;
+            accumulate_shadow_coverages(sample_alpha, distance,
+                coverage, extension_coverage);
+            if (coverage >= 0.9999 && extension_coverage >= 0.9999) break;
         }
-        float extension_coverage = reconstruct_extension_coverage(
-            coverage, root_alpha);
         float weight = fade_weight_aa(first_distance);
         float weighted_coverage = coverage * weight;
         float4 contribution = float4(extension_coverage * weight,
@@ -687,6 +698,7 @@ cbuffer constant0 : register(b0) {
     float fade_out;
     float work_scale;
     float2 source_offset;
+    float source_padding;
     float2 source_size;
 };
 float sample_root_alpha(float2 pixel) {
@@ -1145,7 +1157,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
     obj.pixelshader("resolve_shadow", "cache:longshadown_resolved",
         { "cache:longshadown_shadow_a", "cache:longshadown_source" },
         { buffer_w, buffer_h, fade_in / 100, fade_out / 100, work_scale,
-          source_offset_x, source_offset_y, source_w, source_h }, "copy", "clamp")
+          source_offset_x, source_offset_y, 0, source_w, source_h }, "copy", "clamp")
     obj.clearbuffer("cache:longshadown_shadow_b", buffer_w, buffer_h)
     obj.pixelshader("edge_antialias", "cache:longshadown_shadow_b",
         { "cache:longshadown_resolved", "cache:longshadown_source" },

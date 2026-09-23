@@ -648,15 +648,57 @@ test("resolved extension is reconstructed before 2x averaging", () => {
     /obj\.pixelshader\("resolve_shadow"[\s\S]*?\{\s*"cache:longshadown_shadow_a",\s*"cache:longshadown_source"\s*\}/);
 });
 
+test("resolve shadow constants preserve HLSL register alignment", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@resolve_shadow:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(shader, "resolve_shadow shader was not found");
+  assert.match(shader,
+    /float work_scale;\s*float2 source_offset;\s*float source_padding;\s*float2 source_size;/,
+    "resolve_shadow source_size can straddle the Lua/HLSL register boundary");
+  assert.match(source,
+    /fade_out \/ 100, work_scale,\s*source_offset_x, source_offset_y, 0, source_w, source_h/,
+    "Lua did not supply the HLSL padding slot before source_size");
+});
+
 test("edge refinement emits extension coverage in resolved red", () => {
   const source = readFileSync(scriptPath, "utf8");
   const shader = source.match(
     /--\[\[pixelshader@edge_antialias:([\s\S]*?)\]\]/)?.[1];
   assert.ok(shader, "edge_antialias shader was not found");
   assert.match(shader,
-    /float extension_coverage\s*=\s*reconstruct_extension_coverage\(\s*coverage,\s*root_alpha\)/);
+    /accumulate_shadow_coverages\(\s*sample_alpha,\s*distance,\s*coverage,\s*extension_coverage\s*\)/,
+    "edge refinement did not accumulate positive-distance coverage independently");
   assert.match(shader,
     /float4 contribution\s*=\s*float4\(extension_coverage \* weight,/);
+});
+
+test("opaque roots force independent positive-distance refinement", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@edge_antialias:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(shader, "edge_antialias shader was not found");
+  assert.match(shader,
+    /bool opaque_root_requires_refine\s*=\s*sample_source_alpha\(pos\.xy\)\s*>=\s*0\.9999\s*&&\s*center\.a\s*>\s*0\.0001/);
+  assert.match(shader,
+    /if \(!geometry_edge && !fade_edge && !opaque_root_requires_refine\) return center;/);
+
+  const accumulate = extractFunction(
+    source, "accumulate_shadow_coverages", "void");
+  const assembly = compileConstantResult(`
+${accumulate}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float total = 0;
+    float extension = 0;
+    accumulate_shadow_coverages(1, 0, total, extension);
+    accumulate_shadow_coverages(1, 0.5, total, extension);
+    bool correct = abs(total - 1) < 1e-6 && abs(extension - 1) < 1e-6;
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+  assert.match(assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+    "opaque root coverage discarded its positive-distance extension");
 });
 
 test("Object Opacity selects extension before shadow styling", () => {
