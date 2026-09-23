@@ -77,62 +77,6 @@
 --track@blur_shadow:Blur Shadow,0,4000,0,0.1
 --group
 
---[[pixelshader@seed_shadow:
-Texture2D source_texture : register(t0);
-SamplerState linear_sampler : register(s0);
-cbuffer constant0 : register(b0) {
-    float2 source_offset;
-    float2 source_size;
-    float work_scale;
-};
-float4 seed_shadow(float4 pos : SV_Position) : SV_Target {
-    float2 source_pixel = pos.xy / work_scale - source_offset;
-    if (any(source_pixel < 0) || any(source_pixel >= source_size)) return 0;
-    int2 source_texel = int2(floor(source_pixel));
-    float a = work_scale >= 1.5
-        ? source_texture.SampleLevel(linear_sampler, source_pixel / source_size, 0).a
-        : source_texture[source_texel].a;
-    float2 source_coordinate = a > 0.0001
-        ? float2(0.125, 0.125) + 0.75
-            * (source_texel + float2(0.5, 0.5)) / source_size
-        : float2(0, 0);
-    return float4(source_coordinate.x, 0, source_coordinate.y, a);
-}
-]]
-
---[[pixelshader@directional_step:
-Texture2D near_texture : register(t0);
-Texture2D far_texture : register(t1);
-cbuffer constant0 : register(b0) {
-    float2 buffer_size;
-    float2 direction;
-    float step_length;
-    float total_length;
-    float interval_weight;
-};
-float4 directional_step(float4 pos : SV_Position) : SV_Target {
-    float4 current = near_texture[int2(pos.xy)];
-    float2 sample_pixel = pos.xy - direction * step_length;
-    float4 shifted = 0;
-    if (all(sample_pixel >= 0) && all(sample_pixel < buffer_size)) {
-        shifted = far_texture[int2(floor(sample_pixel))];
-    }
-    shifted.g *= interval_weight;
-    shifted.a *= interval_weight;
-    // G carries R*A; B carries geometry independently from material alpha.
-    float current_distance = saturate(current.g / max(current.a, 1e-6));
-    float shifted_distance = saturate(shifted.g / max(shifted.a, 1e-6)
-        + step_length / max(total_length, 1e-6));
-    float coverage = current.a + (1 - current.a) * shifted.a;
-    bool current_found = current.r > 0.01 && current.b > 0.01;
-    float source_y = current_found ? current.b : shifted.b;
-    float distance = current_found ? current_distance : shifted_distance;
-    float source_x = current_found ? current.r : shifted.r;
-    distance = source_x > 0.01 && source_y > 0.01 ? distance : 1;
-    return float4(source_x, distance * coverage, source_y, coverage);
-}
-]]
-
 --[[pixelshader@direct_raymarch_shadow:
 Texture2D source_texture : register(t0);
 SamplerState linear_sampler : register(s0);
@@ -1132,66 +1076,6 @@ for _, name in ipairs({ "shadow_a", "shadow_b", "shadow_c", "resolved", "source_
     obj.clearbuffer("cache:longshadown_" .. name, 1, 1)
 end
 
-local function render_fast_directional(buffer_w, buffer_h, offset_x, offset_y, work_scale)
-    local r = math.rad(angle)
-    local dx, dy = math.cos(r), math.sin(r)
-    local work_length = shadow_length * work_scale
-    local buffers = {
-        "cache:longshadown_shadow_a",
-        "cache:longshadown_shadow_b",
-        "cache:longshadown_shadow_c",
-    }
-    for _, buffer in ipairs(buffers) do obj.clearbuffer(buffer, buffer_w, buffer_h) end
-    obj.pixelshader("seed_shadow", buffers[1], "cache:longshadown_source",
-        { offset_x, offset_y, source_w, source_h, work_scale }, "copy", "clamp")
-    local function free_buffer(first, second)
-        for _, buffer in ipairs(buffers) do
-            if buffer ~= first and buffer ~= second then return buffer end
-        end
-    end
-    local block = buffers[1]
-    local accumulator = nil
-    local block_size = 1
-    local accumulated = 0
-    local remaining = math.floor(work_length) + 1
-    while remaining > 0 do
-        if remaining % 2 == 1 then
-            if accumulator == nil then
-                accumulator = free_buffer(block, nil)
-                obj.copybuffer(accumulator, block)
-            else
-                local destination = free_buffer(block, accumulator)
-                obj.pixelshader("directional_step", destination, { accumulator, block },
-                    { buffer_w, buffer_h, dx, dy, accumulated, work_length, 1 }, "copy", "clip")
-                accumulator = destination
-            end
-            accumulated = accumulated + block_size
-        end
-        remaining = math.floor(remaining / 2)
-        if remaining > 0 then
-            local destination = free_buffer(block, accumulator)
-            obj.pixelshader("directional_step", destination, { block, block },
-                { buffer_w, buffer_h, dx, dy, block_size, work_length, 1 }, "copy", "clip")
-            block = destination
-            block_size = block_size * 2
-        end
-    end
-    local fractional = work_length - math.floor(work_length)
-    if fractional > 1e-6 then
-        local endpoint = free_buffer(accumulator, nil)
-        obj.pixelshader("seed_shadow", endpoint, "cache:longshadown_source",
-            { offset_x, offset_y, source_w, source_h, work_scale }, "copy", "clamp")
-        local destination = free_buffer(accumulator, endpoint)
-        obj.pixelshader("directional_step", destination, { accumulator, endpoint },
-            { buffer_w, buffer_h, dx, dy, work_length, work_length, fractional }, "copy", "clip")
-        accumulator = destination
-    end
-    if accumulator ~= buffers[1] then obj.copybuffer(buffers[1], accumulator) end
-    local direct_step = get_quality_config(effective_quality)
-    return math.min(MAX_DIRECT_SAMPLES,
-        math.max(2, math.ceil(shadow_length * work_scale / direct_step) + 1))
-end
-
 local function render_direct_shadow(buffer_w, buffer_h,
     source_pos_x, source_pos_y, work_scale)
     local target_scale, effective_length = 1, shadow_length
@@ -1286,7 +1170,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
     end
 end
 
--- Preserve the unexpanded source; seed_shadow places it at the padding offset.
+-- Preserve the unexpanded source for Direct sampling and final compositing.
 obj.copybuffer("cache:longshadown_source", "object")
 obj.cx = obj.cx - (right - left) / 2
 obj.cy = obj.cy - (bottom - top) / 2
@@ -1302,17 +1186,9 @@ end
 local work_w, work_h = obj.w * work_scale, obj.h * work_scale
 
 if should_render_shadow then
-    local target_scale = 1
-    local refine_sample_count
-    local direct_quality_step
     local _, refine_samples = get_quality_config(effective_quality)
-    if shadow_type == 0 and effective_quality < 2 then
-        refine_sample_count = render_fast_directional(
-            work_w, work_h, source_offset_x, source_offset_y, work_scale)
-    else
-        target_scale, refine_sample_count, direct_quality_step = render_direct_shadow(
-            work_w, work_h, source_pos_x, source_pos_y, work_scale)
-    end
+    local target_scale, refine_sample_count, direct_quality_step = render_direct_shadow(
+        work_w, work_h, source_pos_x, source_pos_y, work_scale)
     style_and_filter_shadow(obj.w, obj.h, work_scale,
         target_scale, refine_sample_count, refine_samples, direct_quality_step)
 else

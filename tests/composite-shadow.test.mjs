@@ -66,9 +66,11 @@ test("all embedded pixel shaders compile", () => {
   }
 });
 
-test("obsolete radial and Ultra renderers are removed", () => {
+test("obsolete non-Direct shadow renderers are removed", () => {
   const source = readFileSync(scriptPath, "utf8");
   for (const name of [
+    "seed_shadow",
+    "directional_step",
     "raymarch_shadow",
     "inverse_raymarch_shadow",
     "radial_step",
@@ -80,11 +82,10 @@ test("obsolete radial and Ultra renderers are removed", () => {
     "render_radial_scale",
     "render_inverse_direct",
     "render_ultra_raymarch",
+    "render_fast_directional",
   ]) {
     assert.doesNotMatch(source, new RegExp(`local function ${name}`));
   }
-  assert.match(source, /pixelshader@directional_step:/);
-  assert.match(source, /local function render_fast_directional/);
   assert.match(source, /pixelshader@direct_raymarch_shadow:/);
   assert.match(source, /local function render_direct_shadow/);
 });
@@ -336,14 +337,10 @@ test("Lua direct renderer and routing match the approved matrix", () => {
     /if should_render_shadow then[\s\S]*?\r?\nelse/,
   );
   assert.ok(dispatch, "shadow renderer dispatch was not found");
-  assert.match(
-    dispatch[0],
-    /if shadow_type == 0 and effective_quality < 2 then[\s\S]*?render_fast_directional/,
-  );
-  assert.match(dispatch[0], /else[\s\S]*?render_direct_shadow/);
+  assert.match(dispatch[0], /render_direct_shadow/);
   assert.doesNotMatch(
     dispatch[0],
-    /render_ultra_raymarch|render_radial_scale|render_inverse_direct/,
+    /render_fast_directional|render_ultra_raymarch|render_radial_scale|render_inverse_direct/,
   );
 });
 
