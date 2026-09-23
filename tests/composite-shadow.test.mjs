@@ -612,8 +612,14 @@ test("distance field is smoothed in both axes before either color blur pass", ()
 
 test("correlated coverage difference removes only the shared root", () => {
   const source = readFileSync(scriptPath, "utf8");
-  const difference = extractFunction(source, "shadow_only_coverage", "float");
-  const assembly = compileConstantResult(`
+  for (const shaderName of ["edge_antialias", "resolve_shadow"]) {
+    const shader = source.match(
+      new RegExp(`--\\[\\[pixelshader@${shaderName}:([\\s\\S]*?)\\]\\]`),
+    )?.[1];
+    assert.ok(shader, `${shaderName} shader was not found`);
+    const difference = extractFunction(
+      shader, "shadow_only_coverage", "float");
+    const assembly = compileConstantResult(`
 ${difference}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
     bool correct = abs(shadow_only_coverage(0.5, 0.5) - 0.0) < 1e-6
@@ -623,9 +629,58 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
+    assert.match(assembly,
+      /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+      `${shaderName} retained correlated root coverage`);
+  }
+});
+
+test("ray union does not amplify repeated antialiased coverage", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const directShader = source.match(
+    /--\[\[pixelshader@direct_raymarch_shadow:([\s\S]*?)\]\]/)?.[1];
+  const edgeShader = source.match(
+    /--\[\[pixelshader@edge_antialias:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(directShader, "direct_raymarch_shadow shader was not found");
+  assert.ok(edgeShader, "edge_antialias shader was not found");
+
+  const directUnion = extractFunction(directShader, "union_coverage", "float");
+  const edgeUnion = extractFunction(edgeShader, "union_coverage", "float");
+  const accumulate = extractFunction(
+    edgeShader, "accumulate_shadow_coverages", "void");
+  const difference = extractFunction(
+    edgeShader, "shadow_only_coverage", "float");
+  const assembly = compileConstantResult(`
+${directUnion}
+${difference}
+float direct_case() {
+    float total = union_coverage(0, 0.5);
+    total = union_coverage(total, 0.5);
+    total = union_coverage(total, 0.5);
+    float flat = shadow_only_coverage(total, 0.5);
+    total = union_coverage(total, 0.8);
+    float protruding = shadow_only_coverage(total, 0.5);
+    return abs(flat) < 1e-6 && abs(protruding - 0.3) < 1e-6;
+}
+${edgeUnion.replaceAll("union_coverage", "edge_union_coverage")}
+${accumulate.replaceAll("union_coverage", "edge_union_coverage")}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float total = 0;
+    float extension = 0;
+    accumulate_shadow_coverages(0.5, 0, total, extension);
+    accumulate_shadow_coverages(0.5, 0.25, total, extension);
+    accumulate_shadow_coverages(0.5, 0.5, total, extension);
+    float flat = shadow_only_coverage(extension, 0.5);
+    accumulate_shadow_coverages(0.8, 0.75, total, extension);
+    float protruding = shadow_only_coverage(extension, 0.5);
+    bool correct = direct_case() != 0 && abs(flat) < 1e-6
+        && abs(protruding - 0.3) < 1e-6;
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
   assert.match(assembly,
     /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-    "correlated root coverage survived as a colored shadow outline");
+    "repeated samples amplified a non-extending antialiased edge");
 });
 
 test("shadow-only coverage is differenced before 2x averaging", () => {
@@ -649,7 +704,7 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     /--\[\[pixelshader@resolve_shadow:([\s\S]*?)\]\]/)?.[1];
   assert.ok(shader, "resolve_shadow shader was not found");
   const perSampleDifference = shader.search(
-    /shadow_only_coverage\(\s*extension_coverage,\s*root_alpha\)/);
+    /shadow_only_coverage\(\s*sample_info\.a,\s*root_alpha\)/);
   const averaging = shader.indexOf("shadow_only /= 4");
   assert.ok(perSampleDifference >= 0 && averaging > perSampleDifference,
     "2x resolve averaged correlated coverages before subtraction");

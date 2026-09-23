@@ -98,6 +98,9 @@ float sample_source_alpha_direct(float2 pixel) {
     return saturate(source_texture.SampleLevel(linear_sampler,
         local / source_size, 0).a);
 }
+float union_coverage(float coverage, float sample_alpha) {
+    return max(coverage, saturate(sample_alpha));
+}
 bool clip_parameter_axis(float origin, float delta, float bounds_min,
     float bounds_max, inout float interval_min, inout float interval_max) {
     if (abs(delta) < 1e-6)
@@ -244,7 +247,7 @@ float4 direct_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
             first_source_coordinate = 0.125
                 + 0.75 * (source_local + 0.5) / source_size;
         }
-        coverage += (1 - coverage) * sample_alpha;
+        coverage = union_coverage(coverage, sample_alpha);
         if (coverage >= 0.9999) break;
     }
     return float4(first_source_coordinate.x, first_distance * coverage,
@@ -292,11 +295,8 @@ float sample_source_alpha(float2 pixel) {
     return saturate(source_texture.SampleLevel(linear_sampler,
         local / source_size, 0).a);
 }
-float reconstruct_extension_coverage(float total_coverage,
-    float root_coverage) {
-    float uncovered_root = 1 - saturate(root_coverage);
-    if (uncovered_root <= 1e-6) return 0;
-    return saturate((total_coverage - root_coverage) / uncovered_root);
+float union_coverage(float coverage, float sample_alpha) {
+    return max(coverage, saturate(sample_alpha));
 }
 float shadow_only_coverage(float extension_coverage,
     float root_coverage) {
@@ -304,9 +304,9 @@ float shadow_only_coverage(float extension_coverage,
 }
 void accumulate_shadow_coverages(float sample_alpha, float distance,
     inout float total_coverage, inout float extension_coverage) {
-    total_coverage += (1 - total_coverage) * sample_alpha;
+    total_coverage = union_coverage(total_coverage, sample_alpha);
     if (distance > 1e-6) {
-        extension_coverage += (1 - extension_coverage) * sample_alpha;
+        extension_coverage = union_coverage(extension_coverage, sample_alpha);
     }
 }
 float fade_weight_aa(float distance) {
@@ -708,12 +708,6 @@ float sample_root_alpha(float2 pixel) {
     return saturate(source_texture.SampleLevel(linear_sampler,
         local / source_size, 0).a);
 }
-float reconstruct_extension_coverage(float total_coverage,
-    float root_coverage) {
-    float uncovered_root = 1 - saturate(root_coverage);
-    if (uncovered_root <= 1e-6) return 0;
-    return saturate((total_coverage - root_coverage) / uncovered_root);
-}
 float shadow_only_coverage(float extension_coverage,
     float root_coverage) {
     return saturate(extension_coverage - saturate(root_coverage));
@@ -739,10 +733,8 @@ float4 resolve_shadow(float4 pos : SV_Position) : SV_Target {
                 float4 sample_info = shadow_texture[work_position];
                 float2 pixel = (float2(work_position) + 0.5) / work_scale;
                 float root_alpha = sample_root_alpha(pixel);
-                float extension_coverage = reconstruct_extension_coverage(
-                    sample_info.a, root_alpha);
                 shadow_only += shadow_only_coverage(
-                    extension_coverage, root_alpha);
+                    sample_info.a, root_alpha);
                 shadow_info += sample_info;
             }
         }
@@ -751,9 +743,7 @@ float4 resolve_shadow(float4 pos : SV_Position) : SV_Target {
     } else {
         shadow_info = shadow_texture[int2(pos.xy)];
         float root_alpha = sample_root_alpha(pos.xy / work_scale);
-        float extension_coverage = reconstruct_extension_coverage(
-            shadow_info.a, root_alpha);
-        shadow_only = shadow_only_coverage(extension_coverage, root_alpha);
+        shadow_only = shadow_only_coverage(shadow_info.a, root_alpha);
     }
     float distance = saturate(shadow_info.g / max(shadow_info.a, 1e-6));
     float weight = fade_weight(distance);

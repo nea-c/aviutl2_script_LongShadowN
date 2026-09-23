@@ -4,7 +4,7 @@
 
 **Goal:** Remove the colored source-outline artifact by styling only the per-sample correlated coverage difference `D = saturate(E - R)`.
 
-**Architecture:** Keep the existing Direct raymarch, source-coordinate packing, and total/extension reconstruction. Convert reconstructed extension coverage into shadow-only difference coverage independently in `resolve_shadow` and `edge_antialias`, store it in resolved `.r`, then make `style_shadow` consume `.r` regardless of Object Opacity. Retain continuous final overlap attenuation for shadow spread introduced by smoothing or blur.
+**Architecture:** Keep the existing Direct raymarch and source-coordinate packing, but accumulate ray coverage as fuzzy-set union with `max` so repeated samples of one antialiased edge are not amplified. Compute shadow-only difference coverage independently in `resolve_shadow` and `edge_antialias`, store it in resolved `.r`, then make `style_shadow` consume `.r` regardless of Object Opacity. Retain continuous final overlap attenuation for shadow spread introduced by smoothing or blur.
 
 **Tech Stack:** AviUtl2 `.anm2` Lua script, embedded HLSL Shader Model 5 pixel shaders, Node.js `node:test`, Microsoft FXC.
 
@@ -29,6 +29,26 @@
 - Refined curved edges and glyph holes must use the same difference contract as the center resolve path; Task 2 pins root sampling, subtraction, and contribution order.
 - Fully opaque interior pixels must take the fast return without losing any possible `D`; Task 2 removes and structurally rejects forced opaque-root refinement.
 - Object Opacity 0%, 50%, and 100% must not alter shadow geometry before filtering; Task 3 compiles all three cases and rejects style-shader opacity wiring.
+
+---
+
+## Final Review Correction
+
+The initial Task 1 reconstruction assumed source-over union,
+`T = R + (1 - R) * E`. Final review demonstrated that repeated equal-alpha
+samples from one non-extending edge make that model amplify coverage and leave
+a residual outline. The implementation therefore supersedes the original
+Task 1 accumulation/reconstruction steps with these requirements:
+
+- Direct total coverage is `max` across ray samples;
+- refined total and positive-distance extension coverage are each `max` across
+  their applicable samples;
+- resolve computes `D = saturate(T - R)` directly for every raw sample;
+- repeated `0.5` root/ray samples produce `D = 0`, while a later `0.8` sample
+  against a `0.5` root produces `D = 0.3`;
+- both shader-scoped `shadow_only_coverage` definitions are numerically tested.
+
+The remaining task steps and final-compositing contract are unchanged.
 
 ---
 

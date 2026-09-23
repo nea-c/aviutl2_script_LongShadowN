@@ -63,26 +63,28 @@ No new user parameter or cache buffer is required.
 
 ## Coverage Resolution
 
-The existing Direct accumulation still provides total union coverage `T`, and
-the source is resampled at the exact distance-zero coordinate to obtain `R`.
-Positive-distance coverage `E` is reconstructed where observable:
+Direct accumulation uses fuzzy-set union rather than repeated source-over:
 
-`T = R + (1 - R) * E`
+`union(a, b) = max(a, b)`
 
-`E = saturate((T - R) / max(1 - R, epsilon))`
+This is required because adjacent ray samples often observe the same
+antialiased silhouette coverage. Source-over would amplify repeated `0.5`
+samples toward one and falsely turn them into new geometry.
 
-The resolved shadow-only coverage is then:
+Let `T` be the maximum coverage across all ray samples and `R` the source
+coverage at the exact distance-zero coordinate. The resolved shadow-only
+coverage is directly:
 
-`D = saturate(E - R)`
+`D = saturate(T - R)`
 
 For 2x supersampling, `R`, `E`, and `D` are resolved independently for every
 raw work sample before the four results are averaged. Computing the difference
 after averaging loses the nonlinear set relationship and can recreate a halo.
 
-When `R` is effectively one, `D` is zero by definition. `E` does not need to be
-recovered because no extension can exceed fully opaque root coverage at that
-sample. The previous forced full-interior re-raymarch for opaque roots is
-therefore removed, avoiding its performance cost.
+When `R` is effectively one, `D` is zero by definition. No hidden extension
+needs to be reconstructed because set difference cannot exceed fully opaque
+root coverage at that sample. The previous forced full-interior re-raymarch
+for opaque roots is therefore removed, avoiding its performance cost.
 
 Fade is applied consistently after `D` is formed. The resolved metadata
 contract becomes:
@@ -98,8 +100,8 @@ contract is produced, so its encoded source-coordinate behavior is unchanged.
 ## Edge Refinement
 
 `edge_antialias` must emit the same metadata contract as `resolve_shadow`.
-Every refined subpixel independently accumulates or reconstructs `E`, samples
-its matching root coverage `R`, and stores `D = saturate(E - R)`.
+Every refined subpixel accumulates positive-distance coverage `E` with `max`,
+samples its matching root coverage `R`, and stores `D = saturate(E - R)`.
 
 The difference is computed per refined sample before averaging. Both the fast
 non-edge path and the refined path therefore expose identical channel meanings
@@ -132,7 +134,7 @@ turning the source boundary into a binary cutout.
 
 1. `direct_raymarch_shadow` produces its existing raw packed data.
 2. `resolve_source_color` consumes the raw source-coordinate data unchanged.
-3. `resolve_shadow` obtains `R`, reconstructs `E`, computes per-sample `D`, and
+3. `resolve_shadow` obtains `R`, computes per-sample `D = saturate(T - R)`, and
    writes the new resolved metadata contract.
 4. `edge_antialias` preserves or recomputes the same per-sample `D` contract.
 5. `style_shadow` styles only `D`, independent of Object Opacity.
