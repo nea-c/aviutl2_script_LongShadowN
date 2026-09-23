@@ -447,7 +447,7 @@ test("fade controls expose percent values while shaders receive normalized value
   assert.deepEqual(readTrack("fade_out"), [0, 100, 50]);
 
   const resolveCall = source.match(
-    /obj\.pixelshader\("resolve_shadow"[\s\S]*?\{ buffer_w, buffer_h, ([^,]+), ([^,]+), work_scale \}/,
+    /obj\.pixelshader\("resolve_shadow"[\s\S]*?\{ buffer_w, buffer_h, ([^,]+), ([^,]+), work_scale,/,
   );
   assert.ok(resolveCall, "resolve_shadow call was not found");
   const antialiasCall = source.match(
@@ -608,6 +608,55 @@ test("distance field is smoothed in both axes before either color blur pass", ()
     colorPasses.map((match) => match[1]),
     ["cache:longshadown_blur_distance_b", "cache:longshadown_blur_distance_b"],
   );
+});
+
+test("extension coverage separates root from ray accumulation", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const reconstruct = extractFunction(
+    source, "reconstruct_extension_coverage", "float");
+  const assembly = compileConstantResult(`
+${reconstruct}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float root = 0.4375;
+    float expected_extension = 0.8;
+    float combined = root + (1 - root) * expected_extension;
+    bool correct = abs(reconstruct_extension_coverage(root, root)) < 1e-6
+        && abs(reconstruct_extension_coverage(combined, root)
+            - expected_extension) < 1e-6
+        && abs(reconstruct_extension_coverage(0.6, 0) - 0.6) < 1e-6
+        && abs(reconstruct_extension_coverage(1, 1)) < 1e-6;
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+  assert.match(assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+    "root-only coverage or positive-distance extension was reconstructed incorrectly");
+});
+
+test("resolved extension is reconstructed before 2x averaging", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@resolve_shadow:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(shader, "resolve_shadow shader was not found");
+  const sampleReconstruction = shader.search(
+    /reconstruct_extension_coverage\(\s*sample_info\.a,\s*root_alpha\)/);
+  const averaging = shader.indexOf("shadow_info /= 4");
+  assert.ok(sampleReconstruction >= 0 && averaging > sampleReconstruction,
+    "2x resolve averaged nonlinear coverage before reconstruction");
+  assert.match(shader, /Texture2D source_texture\s*:\s*register\(t1\)/);
+  assert.match(source,
+    /obj\.pixelshader\("resolve_shadow"[\s\S]*?\{\s*"cache:longshadown_shadow_a",\s*"cache:longshadown_source"\s*\}/);
+});
+
+test("edge refinement emits extension coverage in resolved red", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@edge_antialias:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(shader, "edge_antialias shader was not found");
+  assert.match(shader,
+    /float extension_coverage\s*=\s*reconstruct_extension_coverage\(\s*coverage,\s*root_alpha\)/);
+  assert.match(shader,
+    /float4 contribution\s*=\s*float4\(extension_coverage \* weight,/);
 });
 
 test("only exact unextended coverage is hidden outside the source", () => {

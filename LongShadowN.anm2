@@ -292,6 +292,12 @@ float sample_source_alpha(float2 pixel) {
     return saturate(source_texture.SampleLevel(linear_sampler,
         local / source_size, 0).a);
 }
+float reconstruct_extension_coverage(float total_coverage,
+    float root_coverage) {
+    float uncovered_root = 1 - saturate(root_coverage);
+    if (uncovered_root <= 1e-6) return 0;
+    return saturate((total_coverage - root_coverage) / uncovered_root);
+}
 float fade_weight_aa(float distance) {
     float root = fade_in >= 0.9999 ? 1
         : smoothstep(0, max(1 - fade_in, 1e-6), distance);
@@ -438,6 +444,7 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
     for (int i = 0; i < 16; ++i) {
         if (i >= refine_samples) break;
         float2 pixel = pos.xy + refine_offset(i);
+        float root_alpha = sample_source_alpha(pixel);
         float coverage = 0;
         float first_distance = 1;
         float first_alpha = 0;
@@ -497,9 +504,11 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
             coverage += (1 - coverage) * sample_alpha;
             if (coverage >= 0.9999) break;
         }
+        float extension_coverage = reconstruct_extension_coverage(
+            coverage, root_alpha);
         float weight = fade_weight_aa(first_distance);
         float weighted_coverage = coverage * weight;
-        float4 contribution = float4(first_alpha * weight,
+        float4 contribution = float4(extension_coverage * weight,
             first_distance * weighted_coverage,
             found_source ? 1 : 0, weighted_coverage);
         refined += contribution;
@@ -666,12 +675,28 @@ float4 style_shadow(float4 pos : SV_Position) : SV_Target {
 
 --[[pixelshader@resolve_shadow:
 Texture2D shadow_texture : register(t0);
+Texture2D source_texture : register(t1);
+SamplerState linear_sampler : register(s0);
 cbuffer constant0 : register(b0) {
     float2 buffer_size;
     float fade_in;
     float fade_out;
     float work_scale;
+    float2 source_offset;
+    float2 source_size;
 };
+float sample_root_alpha(float2 pixel) {
+    float2 local = pixel - source_offset;
+    if (any(local < 0) || any(local >= source_size)) return 0;
+    return saturate(source_texture.SampleLevel(linear_sampler,
+        local / source_size, 0).a);
+}
+float reconstruct_extension_coverage(float total_coverage,
+    float root_coverage) {
+    float uncovered_root = 1 - saturate(root_coverage);
+    if (uncovered_root <= 1e-6) return 0;
+    return saturate((total_coverage - root_coverage) / uncovered_root);
+}
 float fade_weight(float distance) {
     float root = fade_in >= 0.9999 ? 1
         : smoothstep(0, max(1 - fade_in, 1e-6), distance);
@@ -681,20 +706,35 @@ float fade_weight(float distance) {
 }
 float4 resolve_shadow(float4 pos : SV_Position) : SV_Target {
     float4 shadow_info;
+    float extension_coverage = 0;
     if (work_scale >= 1.5) {
         int2 base = int2(pos.xy) * 2;
-        shadow_info = shadow_texture[base]
-            + shadow_texture[base + int2(1, 0)]
-            + shadow_texture[base + int2(0, 1)]
-            + shadow_texture[base + int2(1, 1)];
+        shadow_info = 0;
+        [unroll]
+        for (int y = 0; y < 2; ++y) {
+            [unroll]
+            for (int x = 0; x < 2; ++x) {
+                int2 work_position = base + int2(x, y);
+                float4 sample_info = shadow_texture[work_position];
+                float2 pixel = (float2(work_position) + 0.5) / work_scale;
+                float root_alpha = sample_root_alpha(pixel);
+                extension_coverage += reconstruct_extension_coverage(
+                    sample_info.a, root_alpha);
+                shadow_info += sample_info;
+            }
+        }
         shadow_info /= 4;
+        extension_coverage /= 4;
     } else {
         shadow_info = shadow_texture[int2(pos.xy)];
+        float root_alpha = sample_root_alpha(pos.xy / work_scale);
+        extension_coverage = reconstruct_extension_coverage(
+            shadow_info.a, root_alpha);
     }
     float distance = saturate(shadow_info.g / max(shadow_info.a, 1e-6));
     float weight = fade_weight(distance);
     float geometry = shadow_info.r > 0.01 && shadow_info.b > 0.01 ? 1 : 0;
-    return float4(shadow_info.r * weight, shadow_info.g * weight,
+    return float4(extension_coverage * weight, shadow_info.g * weight,
         geometry, shadow_info.a * weight);
 }
 ]]
@@ -1105,8 +1145,10 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
         { "cache:longshadown_shadow_a", "cache:longshadown_source" },
         { source_w, source_h, work_scale }, "copy", "clamp")
     obj.clearbuffer("cache:longshadown_resolved", buffer_w, buffer_h)
-    obj.pixelshader("resolve_shadow", "cache:longshadown_resolved", "cache:longshadown_shadow_a",
-        { buffer_w, buffer_h, fade_in / 100, fade_out / 100, work_scale }, "copy", "clamp")
+    obj.pixelshader("resolve_shadow", "cache:longshadown_resolved",
+        { "cache:longshadown_shadow_a", "cache:longshadown_source" },
+        { buffer_w, buffer_h, fade_in / 100, fade_out / 100, work_scale,
+          source_offset_x, source_offset_y, source_w, source_h }, "copy", "clamp")
     obj.clearbuffer("cache:longshadown_shadow_b", buffer_w, buffer_h)
     obj.pixelshader("edge_antialias", "cache:longshadown_shadow_b",
         { "cache:longshadown_resolved", "cache:longshadown_source" },
