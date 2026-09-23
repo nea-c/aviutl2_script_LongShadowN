@@ -97,14 +97,14 @@ test("fade controls expose percent values while shaders receive normalized value
   assert.equal(evaluate(antialiasCall[2], 100, 50), 0.5);
 });
 
-test("blur shadow exposes a practical 200 px range in 0.1 px steps", () => {
+test("blur shadow exposes a 4000 px range in 0.1 px steps", () => {
   const source = readFileSync(scriptPath, "utf8");
   const match = source.match(
     /^--track@blur_shadow:[^,]+,(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/m,
   );
   assert.ok(match, "Blur Shadow track was not found");
 
-  assert.deepEqual(match.slice(1).map(Number), [0, 200, 0, 0.1]);
+  assert.deepEqual(match.slice(1).map(Number), [0, 4000, 0, 0.1]);
 });
 
 test("blur sampling keeps at most 3.125 px spacing throughout the upper range", () => {
@@ -222,7 +222,7 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
 
 test("distance field is smoothed in both axes before either color blur pass", () => {
   const source = readFileSync(scriptPath, "utf8");
-  const blurPipeline = source.match(/if blur_shadow > 0 then([\s\S]*?)\n    end\nend/);
+  const blurPipeline = source.match(/if blur_shadow > 0 then([\s\S]*?)\r?\n    end\r?\nend/);
   assert.ok(blurPipeline, "blur pipeline was not found");
 
   const horizontalDistance = blurPipeline[1].match(
