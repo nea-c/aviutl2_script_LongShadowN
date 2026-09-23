@@ -371,6 +371,92 @@ test("inverse direct Lua quality spacing remains 4 2 and 1 source pixels", () =>
   assert.deepEqual(activeCounts, [257, 513, 1025]);
 });
 
+test("clipped inverse refinement keeps endpoints misses and source-space quality spacing", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@edge_antialias:\s*([\s\S]*?)\]\]/,
+  );
+  assert.ok(shader, "edge_antialias shader was not found");
+  const intervalFunction = extractFunction(shader[1], "inverse_ray_interval", "bool");
+  const distanceToU = extractFunction(shader[1], "inverse_u_from_distance", "float");
+  const uToDistance = extractFunction(shader[1], "inverse_distance_from_u", "float");
+  const sampleU = extractFunction(shader[1], "inverse_sample_u", "float");
+  const assembly = compileConstantResult(`
+${intervalFunction}
+${distanceToU}
+${uToDistance}
+${sampleU}
+
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float start_distance, end_distance, source_span;
+    bool hit = inverse_ray_interval(
+        float2(0.5, 0), float2(0, 0), float2(-1, -1), float2(1, 1),
+        0.25, start_distance, end_distance, source_span);
+    float2 first = float2(0, 0)
+        + float2(0.5, 0) / pow(0.25, start_distance);
+    float2 last = float2(0, 0)
+        + float2(0.5, 0) / pow(0.25, end_distance);
+
+    float miss_start, miss_end, miss_span;
+    bool miss = inverse_ray_interval(
+        float2(2, 0), float2(0, 0), float2(-2, -1), float2(-1, 1),
+        0.25, miss_start, miss_end, miss_span);
+
+    float target_scale = 0.5 / length(float2(512, 512));
+    float delta_length = target_scale * 1024;
+    float draft_previous_u = inverse_sample_u(0, 1, target_scale, 255, 257);
+    float draft_end_u = inverse_sample_u(0, 1, target_scale, 256, 257);
+    float standard_previous_u = inverse_sample_u(0, 1, target_scale, 511, 513);
+    float standard_end_u = inverse_sample_u(0, 1, target_scale, 512, 513);
+    float high_previous_u = inverse_sample_u(0, 1, target_scale, 1023, 1025);
+    float high_end_u = inverse_sample_u(0, 1, target_scale, 1024, 1025);
+    float metadata_distance = inverse_distance_from_u(target_scale, 17);
+
+    bool correct = hit && !miss
+        && abs(start_distance) < 1e-5
+        && abs(end_distance - 0.5) < 1e-5
+        && all(first >= -1) && all(first < 1)
+        && all(last >= -1) && all(last < 1)
+        && delta_length * (draft_end_u - draft_previous_u) <= 4.0001
+        && delta_length * (standard_end_u - standard_previous_u) <= 2.0001
+        && delta_length * (high_end_u - high_previous_u) <= 1.0001
+        && abs(inverse_u_from_distance(target_scale, metadata_distance) - 17) < 1e-4;
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+  assert.match(
+    assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+  );
+
+  assert.match(shader[1], /shadow_type >= 1\.5[\s\S]*?inverse_ray_interval/);
+  assert.match(
+    shader[1],
+    /ceil\(source_span \* work_scale \/ inverse_quality_step\) \+ 1/,
+  );
+  assert.match(shader[1], /float sample_u = inverse_sample_u\(start_distance, end_distance,\s*target_scale, sample, active_samples\)/);
+  assert.match(shader[1], /source_pixel = projection_origin\s*\+ \(pixel - projection_origin\) \* sample_u/);
+  assert.match(shader[1], /distance = inverse_distance_from_u\(target_scale, sample_u\)/);
+});
+
+test("clipped inverse refinement preserves directional radial and Lua contracts", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@edge_antialias:\s*([\s\S]*?)\]\]/,
+  );
+  assert.ok(shader, "edge_antialias shader was not found");
+  assert.match(shader[1], /float dense_refine;\s*float inverse_quality_step;\s*float work_scale;/);
+  assert.match(shader[1], /if \(shadow_type < 0\.5\) \{\s*source_pixel = pixel\s*- direction \* \(distance \* total_length\);\s*\} else if \(shadow_type < 1\.5\) \{/);
+  assert.match(shader[1], /float projection_scale = pow\(max\(target_scale, 1e-6\), distance\);\s*source_pixel = projection_origin\s*\+ \(pixel - projection_origin\) \/ projection_scale;/);
+
+  const styleFunction = source.match(
+    /local function style_and_filter_shadow\([\s\S]*?\r?\nend/,
+  );
+  assert.ok(styleFunction, "style_and_filter_shadow was not found");
+  assert.match(styleFunction[0], /target_scale, refine_sample_count, refine_samples, inverse_quality_step\)/);
+  assert.match(styleFunction[0], /fade_in \/ 100, fade_out \/ 100, effective_quality >= 2 and 1 or 0,\s*inverse_quality_step, work_scale \}, "copy", "clamp"\)/);
+});
+
 test("inverse direct dispatch keeps Ultra Directional and Radial paths unchanged", () => {
   const source = readFileSync(scriptPath, "utf8");
   const dispatch = source.match(

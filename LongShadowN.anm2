@@ -378,6 +378,8 @@ cbuffer constant0 : register(b0) {
     float fade_in;
     float fade_out;
     float dense_refine;
+    float inverse_quality_step;
+    float work_scale;
 };
 float2 refine_offset(int index) {
     int pair_index = index >> 1;
@@ -404,6 +406,107 @@ float fade_weight_aa(float distance) {
     float tip = fade_out <= 0.0001 ? 1
         : smoothstep(0, fade_out, 1 - distance);
     return root * tip;
+}
+bool inverse_ray_interval(float2 pixel, float2 origin,
+    float2 bounds_min, float2 bounds_max, float target_scale,
+    out float start_distance, out float end_distance, out float source_span) {
+    start_distance = 0;
+    end_distance = 0;
+    source_span = 0;
+    float safe_scale = max(target_scale, 1e-6);
+    float maximum_u = 1 / safe_scale;
+    float minimum_u = 1;
+    float2 delta = pixel - origin;
+
+    if (abs(delta.x) < 1e-6) {
+        if (origin.x < bounds_min.x || origin.x >= bounds_max.x) return false;
+    } else {
+        float x0 = (bounds_min.x - origin.x) / delta.x;
+        float x1 = (bounds_max.x - origin.x) / delta.x;
+        minimum_u = max(minimum_u, min(x0, x1));
+        maximum_u = min(maximum_u, max(x0, x1));
+    }
+    if (abs(delta.y) < 1e-6) {
+        if (origin.y < bounds_min.y || origin.y >= bounds_max.y) return false;
+    } else {
+        float y0 = (bounds_min.y - origin.y) / delta.y;
+        float y1 = (bounds_max.y - origin.y) / delta.y;
+        minimum_u = max(minimum_u, min(y0, y1));
+        maximum_u = min(maximum_u, max(y0, y1));
+    }
+    if (maximum_u <= minimum_u) return false;
+
+    float inset_u = (maximum_u - minimum_u) * 1e-5;
+    if (any(origin + delta * minimum_u >= bounds_max)) minimum_u += inset_u;
+    if (any(origin + delta * maximum_u >= bounds_max)) maximum_u -= inset_u;
+    float logarithmic_range = max(-log(safe_scale), 1e-6);
+    start_distance = saturate(log(max(minimum_u, 1)) / logarithmic_range);
+    end_distance = saturate(log(max(maximum_u, 1)) / logarithmic_range);
+
+    float2 first_point = origin + delta / pow(safe_scale, start_distance);
+    float2 last_point = origin + delta / pow(safe_scale, end_distance);
+    bool first_outside = any(first_point < bounds_min)
+        || any(first_point >= bounds_max);
+    bool last_outside = any(last_point < bounds_min)
+        || any(last_point >= bounds_max);
+    if (first_outside || last_outside) {
+        // Check the same distance-to-source reconstruction used by the renderer.
+        if (end_distance <= start_distance) return false;
+        float midpoint_distance = start_distance
+            + (end_distance - start_distance) * 0.5;
+        float2 midpoint = origin + delta / pow(safe_scale, midpoint_distance);
+        if (any(midpoint < bounds_min) || any(midpoint >= bounds_max)) return false;
+        if (first_outside) {
+            float outside_distance = start_distance;
+            float inside_distance = midpoint_distance;
+            [unroll]
+            for (int refinement = 0; refinement < 10; ++refinement) {
+                float candidate_distance = outside_distance
+                    + (inside_distance - outside_distance) * 0.5;
+                float2 candidate = origin + delta
+                    / pow(safe_scale, candidate_distance);
+                if (any(candidate < bounds_min) || any(candidate >= bounds_max))
+                    outside_distance = candidate_distance;
+                else inside_distance = candidate_distance;
+            }
+            start_distance = inside_distance;
+        }
+        if (last_outside) {
+            float inside_distance = midpoint_distance;
+            float outside_distance = end_distance;
+            [unroll]
+            for (int refinement = 0; refinement < 10; ++refinement) {
+                float candidate_distance = inside_distance
+                    + (outside_distance - inside_distance) * 0.5;
+                float2 candidate = origin + delta
+                    / pow(safe_scale, candidate_distance);
+                if (any(candidate < bounds_min) || any(candidate >= bounds_max))
+                    outside_distance = candidate_distance;
+                else inside_distance = candidate_distance;
+            }
+            end_distance = inside_distance;
+        }
+    }
+
+    float first_u = 1 / pow(safe_scale, start_distance);
+    float last_u = 1 / pow(safe_scale, end_distance);
+    source_span = length(delta) * max(last_u - first_u, 0);
+    return end_distance >= start_distance;
+}
+float inverse_u_from_distance(float target_scale, float distance) {
+    return 1 / pow(max(target_scale, 1e-6), distance);
+}
+float inverse_distance_from_u(float target_scale, float u) {
+    float safe_scale = max(target_scale, 1e-6);
+    return saturate(log(max(u, 1)) / max(-log(safe_scale), 1e-6));
+}
+float inverse_sample_u(float start_distance, float end_distance,
+    float target_scale, int sample, int active_samples) {
+    float start_u = inverse_u_from_distance(target_scale, start_distance);
+    float end_u = inverse_u_from_distance(target_scale, end_distance);
+    if (sample == active_samples - 1) return end_u;
+    float progress = sample / max(active_samples - 1.0, 1.0);
+    return lerp(start_u, end_u, progress);
 }
 float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
     float4 center = shadow_texture[int2(pos.xy)];
@@ -448,7 +551,17 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
         float first_alpha = 0;
         bool found_source = false;
         float active_sample_count = sample_count;
-        if (shadow_type >= 0.5) {
+        int active_samples = 2;
+        float start_distance = 0;
+        float end_distance = 1;
+        float source_span = 0;
+        if (shadow_type >= 1.5) {
+            if (!inverse_ray_interval(pixel, projection_origin, source_offset,
+                    source_offset + source_size, target_scale,
+                    start_distance, end_distance, source_span)) continue;
+            active_samples = min(8001,
+                max(2, (int)ceil(source_span * work_scale / inverse_quality_step) + 1));
+        } else if (shadow_type >= 0.5) {
             float safe_scale = max(target_scale, 1e-6);
             float radial_speed = length(pixel - projection_origin)
                 * abs(log(safe_scale)) * max(1, 1 / safe_scale);
@@ -457,17 +570,27 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
         }
         [loop]
         for (int sample = 0; sample < 8001; ++sample) {
-            if (sample >= active_sample_count) break;
-            float distance = sample == active_sample_count - 1
-                ? 1 : sample / max(active_sample_count - 1, 1);
-            float2 source_pixel;
-            if (shadow_type < 0.5) {
-                source_pixel = pixel
-                    - direction * (distance * total_length);
-            } else {
-                float projection_scale = pow(max(target_scale, 1e-6), distance);
+            float distance = 1;
+            float2 source_pixel = 0;
+            if (shadow_type >= 1.5) {
+                if (sample >= active_samples) break;
+                float sample_u = inverse_sample_u(start_distance, end_distance,
+                    target_scale, sample, active_samples);
                 source_pixel = projection_origin
-                    + (pixel - projection_origin) / projection_scale;
+                    + (pixel - projection_origin) * sample_u;
+                distance = inverse_distance_from_u(target_scale, sample_u);
+            } else {
+                if (sample >= active_sample_count) break;
+                distance = sample == active_sample_count - 1
+                    ? 1 : sample / max(active_sample_count - 1, 1);
+                if (shadow_type < 0.5) {
+                    source_pixel = pixel
+                        - direction * (distance * total_length);
+                } else if (shadow_type < 1.5) {
+                    float projection_scale = pow(max(target_scale, 1e-6), distance);
+                    source_pixel = projection_origin
+                        + (pixel - projection_origin) / projection_scale;
+                }
             }
             float sample_alpha = sample_source_alpha(source_pixel);
             if (sample_alpha > 0.0001 && !found_source) {
@@ -1283,7 +1406,8 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
         { buffer_w, buffer_h, source_offset_x, source_offset_y, source_w, source_h,
           source_pos_x, source_pos_y, math.cos(math.rad(angle)), math.sin(math.rad(angle)),
           shadow_length, target_scale, shadow_type, refine_sample_count, refine_samples,
-          fade_in / 100, fade_out / 100, effective_quality >= 2 and 1 or 0 }, "copy", "clamp")
+          fade_in / 100, fade_out / 100, effective_quality >= 2 and 1 or 0,
+          inverse_quality_step, work_scale }, "copy", "clamp")
     obj.copybuffer("cache:longshadown_resolved", "cache:longshadown_shadow_b")
     obj.clearbuffer("cache:longshadown_final", buffer_w, buffer_h)
     -- Clamp preserves the 1D endpoints; wrapped UVs and the loop sampler give
