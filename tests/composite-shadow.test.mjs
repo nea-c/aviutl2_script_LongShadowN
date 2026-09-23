@@ -610,42 +610,49 @@ test("distance field is smoothed in both axes before either color blur pass", ()
   );
 });
 
-test("extension coverage separates root from ray accumulation", () => {
+test("correlated coverage difference removes only the shared root", () => {
   const source = readFileSync(scriptPath, "utf8");
-  const reconstruct = extractFunction(
-    source, "reconstruct_extension_coverage", "float");
+  const difference = extractFunction(source, "shadow_only_coverage", "float");
   const assembly = compileConstantResult(`
-${reconstruct}
+${difference}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float root = 0.4375;
-    float expected_extension = 0.8;
-    float combined = root + (1 - root) * expected_extension;
-    bool correct = abs(reconstruct_extension_coverage(root, root)) < 1e-6
-        && abs(reconstruct_extension_coverage(combined, root)
-            - expected_extension) < 1e-6
-        && abs(reconstruct_extension_coverage(0.6, 0) - 0.6) < 1e-6
-        && abs(reconstruct_extension_coverage(1, 1)) < 1e-6;
+    bool correct = abs(shadow_only_coverage(0.5, 0.5) - 0.0) < 1e-6
+        && abs(shadow_only_coverage(0.8, 0.5) - 0.3) < 1e-6
+        && abs(shadow_only_coverage(0.4, 0.0) - 0.4) < 1e-6
+        && abs(shadow_only_coverage(0.2, 0.6) - 0.0) < 1e-6;
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
   assert.match(assembly,
     /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-    "root-only coverage or positive-distance extension was reconstructed incorrectly");
+    "correlated root coverage survived as a colored shadow outline");
 });
 
-test("resolved extension is reconstructed before 2x averaging", () => {
+test("shadow-only coverage is differenced before 2x averaging", () => {
   const source = readFileSync(scriptPath, "utf8");
+  const difference = extractFunction(source, "shadow_only_coverage", "float");
+  const assembly = compileConstantResult(`
+${difference}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float per_sample = (shadow_only_coverage(0.1, 0.9)
+        + shadow_only_coverage(0.9, 0.1)) * 0.5;
+    float after_average = shadow_only_coverage(0.5, 0.5);
+    bool correct = abs(per_sample - 0.4) < 1e-6
+        && abs(after_average) < 1e-6;
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+  assert.match(assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/);
+
   const shader = source.match(
     /--\[\[pixelshader@resolve_shadow:([\s\S]*?)\]\]/)?.[1];
   assert.ok(shader, "resolve_shadow shader was not found");
-  const sampleReconstruction = shader.search(
-    /reconstruct_extension_coverage\(\s*sample_info\.a,\s*root_alpha\)/);
-  const averaging = shader.indexOf("shadow_info /= 4");
-  assert.ok(sampleReconstruction >= 0 && averaging > sampleReconstruction,
-    "2x resolve averaged nonlinear coverage before reconstruction");
-  assert.match(shader, /Texture2D source_texture\s*:\s*register\(t1\)/);
-  assert.match(source,
-    /obj\.pixelshader\("resolve_shadow"[\s\S]*?\{\s*"cache:longshadown_shadow_a",\s*"cache:longshadown_source"\s*\}/);
+  const perSampleDifference = shader.search(
+    /shadow_only_coverage\(\s*extension_coverage,\s*root_alpha\)/);
+  const averaging = shader.indexOf("shadow_only /= 4");
+  assert.ok(perSampleDifference >= 0 && averaging > perSampleDifference,
+    "2x resolve averaged correlated coverages before subtraction");
 });
 
 test("resolve shadow constants preserve HLSL register alignment", () => {
@@ -667,7 +674,7 @@ test("edge refinement emits extension coverage in resolved red", () => {
     /--\[\[pixelshader@edge_antialias:([\s\S]*?)\]\]/)?.[1];
   assert.ok(shader, "edge_antialias shader was not found");
   assert.match(shader,
-    /accumulate_shadow_coverages\(\s*sample_alpha,\s*length\(source_pixel - pixel\),\s*direct_quality_step,\s*work_scale,\s*coverage,\s*extension_coverage\s*\)/,
+    /accumulate_shadow_coverages\(\s*sample_alpha,\s*distance,\s*coverage,\s*extension_coverage\s*\)/,
     "edge refinement did not accumulate positive-distance coverage independently");
   assert.match(shader,
     /float4 contribution\s*=\s*float4\(extension_coverage \* weight,/);
@@ -685,16 +692,13 @@ test("opaque roots force independent positive-distance refinement", () => {
 
   const accumulate = extractFunction(
     source, "accumulate_shadow_coverages", "void");
-  const extensionSample = extractFunction(
-    source, "extension_sample_alpha", "float");
   const assembly = compileConstantResult(`
-${extensionSample}
 ${accumulate}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
     float total = 0;
     float extension = 0;
-    accumulate_shadow_coverages(1, 0, 0.5, 1, total, extension);
-    accumulate_shadow_coverages(1, 1, 0.5, 1, total, extension);
+    accumulate_shadow_coverages(1, 0, total, extension);
+    accumulate_shadow_coverages(1, 0.5, total, extension);
     bool correct = abs(total - 1) < 1e-6 && abs(extension - 1) < 1e-6;
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
@@ -704,47 +708,38 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     "opaque root coverage discarded its positive-distance extension");
 });
 
-test("extension coverage begins at the High-equivalent travel distance", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const extensionSample = extractFunction(
-    source, "extension_sample_alpha", "float");
-  const assembly = compileConstantResult(`
-${extensionSample}
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    bool roots_excluded = extension_sample_alpha(0.8, 0, 0.5, 1) == 0
-        && extension_sample_alpha(0.8, 0, 1, 1) == 0
-        && extension_sample_alpha(0.8, 0, 2, 1) == 0;
-    bool native_ultra = extension_sample_alpha(0.8, 0.5, 0.5, 1) == 0
-        && abs(extension_sample_alpha(0.8, 1, 0.5, 1) - 0.8) < 1e-6;
-    bool supersampled_ultra = extension_sample_alpha(0.8, 0.25, 0.5, 2) == 0
-        && abs(extension_sample_alpha(0.8, 0.5, 0.5, 2) - 0.8) < 1e-6;
-    bool high_unchanged = abs(extension_sample_alpha(0.8, 1, 1, 1) - 0.8) < 1e-6;
-    return roots_excluded && native_ultra && supersampled_ultra && high_unchanged
-        ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-}
-`);
-  assert.match(assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-    "sub-High Ultra samples leaked into extension coverage");
-});
-
-test("Object Opacity never restores distance-zero shadow coverage", () => {
+test("Object Opacity selects extension before shadow styling", () => {
   const source = readFileSync(scriptPath, "utf8");
   const selectCoverage = extractFunction(
     source, "select_shadow_coverage", "float");
-  for (const opacity of ["0", "0.5", "1"]) {
+  const cases = [["0", "0.4"], ["0.5", "0.6"], ["1", "0.8"]];
+  for (const [opacity, expected] of cases) {
     const assembly = compileConstantResult(`
 static const float object_opacity = ${opacity};
 ${selectCoverage}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
     float result = select_shadow_coverage(float4(0.4, 0.2, 1, 0.8));
-    bool correct = abs(result - 0.4) < 1e-6;
+    bool correct = abs(result - ${expected}) < 1e-6;
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
     assert.match(assembly,
       /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
       `Object Opacity ${opacity}`);
+  }
+});
+
+test("style shadow receives normalized Object Opacity before filtering", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const calls = [...source.matchAll(
+    /obj\.pixelshader\("style_shadow"[\s\S]*?shadow_mix \/ 100, shadow_type, target_scale,\s*([^}]+)\}, "copy", "(?:loop|clamp)"\)/g,
+  )];
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    const normalized = Function(
+      "object_opacity", `return ${call[1]};`,
+    )(50);
+    assert.equal(normalized, 0.5);
   }
 });
 
