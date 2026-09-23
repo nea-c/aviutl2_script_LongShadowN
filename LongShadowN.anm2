@@ -167,6 +167,14 @@ bool clip_parameter_axis(float origin, float delta, float bounds_min,
 bool point_inside_bounds(float2 sample_position, float2 bounds_min, float2 bounds_max) {
     return all(sample_position >= bounds_min) && all(sample_position < bounds_max);
 }
+float next_parameter_toward(float boundary, float inside_parameter) {
+    if (boundary == inside_parameter) return boundary;
+    if (boundary == 0)
+        return inside_parameter > 0 ? asfloat(0x00000001u) : asfloat(0x80000001u);
+    uint bits = asuint(boundary);
+    bool increase_bits = (boundary > 0) == (inside_parameter > boundary);
+    return asfloat(increase_bits ? bits + 1u : bits - 1u);
+}
 bool finish_clipped_interval(float2 origin, float2 delta,
     float2 bounds_min, float2 bounds_max,
     inout float interval_min, inout float interval_max) {
@@ -176,29 +184,11 @@ bool finish_clipped_interval(float2 origin, float2 delta,
             bounds_min, bounds_max)) return false;
     if (!point_inside_bounds(origin + delta * interval_min,
             bounds_min, bounds_max)) {
-        float outside_parameter = interval_min;
-        float inside_parameter = midpoint;
-        [unroll]
-        for (int refinement = 0; refinement < 16; ++refinement) {
-            float candidate = (outside_parameter + inside_parameter) * 0.5;
-            if (point_inside_bounds(origin + delta * candidate,
-                    bounds_min, bounds_max)) inside_parameter = candidate;
-            else outside_parameter = candidate;
-        }
-        interval_min = inside_parameter;
+        interval_min = next_parameter_toward(interval_min, midpoint);
     }
     if (!point_inside_bounds(origin + delta * interval_max,
             bounds_min, bounds_max)) {
-        float inside_parameter = midpoint;
-        float outside_parameter = interval_max;
-        [unroll]
-        for (int refinement = 0; refinement < 16; ++refinement) {
-            float candidate = (inside_parameter + outside_parameter) * 0.5;
-            if (point_inside_bounds(origin + delta * candidate,
-                    bounds_min, bounds_max)) inside_parameter = candidate;
-            else outside_parameter = candidate;
-        }
-        interval_max = inside_parameter;
+        interval_max = next_parameter_toward(interval_max, midpoint);
     }
     return interval_max > interval_min
         && point_inside_bounds(origin + delta * interval_min,
@@ -378,6 +368,14 @@ bool clip_parameter_axis(float origin, float delta, float bounds_min,
 bool point_inside_bounds(float2 sample_position, float2 bounds_min, float2 bounds_max) {
     return all(sample_position >= bounds_min) && all(sample_position < bounds_max);
 }
+float next_parameter_toward(float boundary, float inside_parameter) {
+    if (boundary == inside_parameter) return boundary;
+    if (boundary == 0)
+        return inside_parameter > 0 ? asfloat(0x00000001u) : asfloat(0x80000001u);
+    uint bits = asuint(boundary);
+    bool increase_bits = (boundary > 0) == (inside_parameter > boundary);
+    return asfloat(increase_bits ? bits + 1u : bits - 1u);
+}
 bool finish_clipped_interval(float2 origin, float2 delta,
     float2 bounds_min, float2 bounds_max,
     inout float interval_min, inout float interval_max) {
@@ -387,29 +385,11 @@ bool finish_clipped_interval(float2 origin, float2 delta,
             bounds_min, bounds_max)) return false;
     if (!point_inside_bounds(origin + delta * interval_min,
             bounds_min, bounds_max)) {
-        float outside_parameter = interval_min;
-        float inside_parameter = midpoint;
-        [unroll]
-        for (int refinement = 0; refinement < 16; ++refinement) {
-            float candidate = (outside_parameter + inside_parameter) * 0.5;
-            if (point_inside_bounds(origin + delta * candidate,
-                    bounds_min, bounds_max)) inside_parameter = candidate;
-            else outside_parameter = candidate;
-        }
-        interval_min = inside_parameter;
+        interval_min = next_parameter_toward(interval_min, midpoint);
     }
     if (!point_inside_bounds(origin + delta * interval_max,
             bounds_min, bounds_max)) {
-        float inside_parameter = midpoint;
-        float outside_parameter = interval_max;
-        [unroll]
-        for (int refinement = 0; refinement < 16; ++refinement) {
-            float candidate = (inside_parameter + outside_parameter) * 0.5;
-            if (point_inside_bounds(origin + delta * candidate,
-                    bounds_min, bounds_max)) inside_parameter = candidate;
-            else outside_parameter = candidate;
-        }
-        interval_max = inside_parameter;
+        interval_max = next_parameter_toward(interval_max, midpoint);
     }
     return interval_max > interval_min
         && point_inside_bounds(origin + delta * interval_min,

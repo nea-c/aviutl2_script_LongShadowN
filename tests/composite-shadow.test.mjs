@@ -93,6 +93,7 @@ test("direct interval helpers clip directional radial and inverse rays", () => {
   const source = readFileSync(scriptPath, "utf8");
   const clipAxis = extractFunction(source, "clip_parameter_axis", "bool");
   const pointInside = extractFunction(source, "point_inside_bounds", "bool");
+  const nextParameter = extractFunction(source, "next_parameter_toward", "float");
   const finishInterval = extractFunction(source, "finish_clipped_interval", "bool");
   const directional = extractFunction(source, "directional_ray_interval", "bool");
   const projection = extractFunction(source, "projection_ray_interval", "bool");
@@ -100,6 +101,7 @@ test("direct interval helpers clip directional radial and inverse rays", () => {
   const assembly = compileConstantResult(`
 ${clipAxis}
 ${pointInside}
+${nextParameter}
 ${finishInterval}
 ${directional}
 ${projection}
@@ -161,6 +163,7 @@ test("projection interval preserves boundary edge cases", () => {
   const helpers = [
     extractFunction(shader[1], "clip_parameter_axis", "bool"),
     extractFunction(shader[1], "point_inside_bounds", "bool"),
+    extractFunction(shader[1], "next_parameter_toward", "float"),
     extractFunction(shader[1], "finish_clipped_interval", "bool"),
     extractFunction(shader[1], "projection_ray_interval", "bool"),
   ].join("\n");
@@ -212,6 +215,21 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     assembly,
     /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
   );
+});
+
+test("endpoint adjustment is constant time in both Direct traversals", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  for (const shaderName of ["direct_raymarch_shadow", "edge_antialias"]) {
+    const shader = source.match(
+      new RegExp(`--\\[\\[pixelshader@${shaderName}:\\s*([\\s\\S]*?)\\]\\]`),
+    );
+    assert.ok(shader, `${shaderName} shader was not found`);
+    const nudge = extractFunction(shader[1], "next_parameter_toward", "float");
+    const finish = extractFunction(shader[1], "finish_clipped_interval", "bool");
+    assert.match(nudge, /asuint\(|asfloat\(/);
+    assert.doesNotMatch(finish, /\bfor\s*\(/);
+    assert.match(finish, /next_parameter_toward\(/);
+  }
 });
 
 test("Direct shader and Lua renderer share the packed source contract", () => {
@@ -298,6 +316,7 @@ test("edge Direct helpers keep projection order endpoints and misses", () => {
   assert.ok(shader, "edge_antialias shader was not found");
   const clipAxis = extractFunction(shader[1], "clip_parameter_axis", "bool");
   const pointInside = extractFunction(shader[1], "point_inside_bounds", "bool");
+  const nextParameter = extractFunction(shader[1], "next_parameter_toward", "float");
   const finishInterval = extractFunction(shader[1], "finish_clipped_interval", "bool");
   const projectionInterval = extractFunction(shader[1], "projection_ray_interval", "bool");
   const distanceFromU = extractFunction(shader[1], "projection_distance_from_u", "float");
@@ -305,6 +324,7 @@ test("edge Direct helpers keep projection order endpoints and misses", () => {
   const assembly = compileConstantResult(`
 ${clipAxis}
 ${pointInside}
+${nextParameter}
 ${finishInterval}
 ${projectionInterval}
 ${distanceFromU}
