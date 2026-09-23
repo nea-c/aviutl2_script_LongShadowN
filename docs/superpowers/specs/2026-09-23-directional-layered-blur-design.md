@@ -112,3 +112,14 @@ holes and shadow roots, then check Blur 0, several blur strengths, all four
 qualities, and Object Opacity 0/50/100%. Record the appearance and relative
 render time. Automated tests alone cannot establish that the visible wedges
 are fixed.
+
+## Trial status (2026-09-24)
+
+The Directional-only two-layer path is implemented on `master` through
+`eabd4df`. All 42 automated tests pass, including embedded shader compilation.
+The reported AviUtl2 scene is not present in this repository. An attempt to
+inspect the running AviUtl2 window timed out awaiting app-operation approval,
+so neither the visual result nor the Standard/Ultra performance cost has been
+measured. Keep this as an unverified experiment until the user compares the
+scene at Fade 50 and Blur Shadow 40; do not extend it to other shadow types
+based on automated tests alone.
