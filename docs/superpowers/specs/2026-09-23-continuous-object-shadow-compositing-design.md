@@ -2,130 +2,164 @@
 
 ## Goal
 
-Preserve the source object's antialiasing where it overlaps the shadow, avoid
-colored or dark fringes on either side of the source boundary, and make Object
-Opacity remove the source-overlapping part of the shadow continuously rather
-than through a binary mask.
+Preserve source antialiasing where it overlaps the shadow, remove the colored
+distance-zero outline around a hidden object, and retain only the shadow that
+actually extends away from the object when Object Opacity is zero.
 
-When Object Opacity is zero, the source object and the shadow underneath its
-coverage disappear, while the shadow that extends beyond the object remains.
-The transition from the removed overlap to the extended shadow retains
-antialiasing.
+At Object Opacity zero, the source and shadow beneath its coverage disappear.
+The positive-distance extension remains, including inside glyph holes, and the
+cutout boundary retains continuous antialiasing. Object Opacity 100 keeps the
+current full shadow and normal premultiplied source-over appearance.
 
-## Current Failure
+## Root Cause
 
-`neutralize_shadow` converts source alpha into one-byte support with
-`saturate(source.a * 255)`. Almost every nonzero antialiased source pixel
-therefore becomes a full-strength mask. Where a shadow exists, that mask
-replaces the shadow with an opaque object-colored backing. This avoids a dark
-gap, but it necessarily makes the overlapping source edge look alpha-binary.
+The Direct renderer currently stores one union coverage value containing both
+the distance-zero source footprint and all positive-distance ray samples. The
+final compositor sees only that combined value. First-hit distance cannot
+separate the two: a pixel may hit a partially transparent root at distance zero
+and later accumulate real positive-distance coverage.
 
-Earlier fixes also showed that removing all shadow beneath antialiased pixels
-is not valid: doing so exposes the background as a fringe on the shadow-facing
-edge. The compositor must retain continuous source coverage and distinguish
-unextended distance-zero coverage from the shadow that actually extends away
-from the object.
+The previous final-only fix therefore had two incompatible outcomes:
+
+- retaining combined coverage leaves a thin shadow-colored copy of the source
+  boundary when Object Opacity is zero;
+- rejecting every zero-first-hit pixel can also delete real extension inside
+  transparent glyph holes.
+
+The distinction must be recovered before styling and post-processing, where
+the original Direct coverage and source texture are both available.
 
 ## Selected Approach
 
-Use normal premultiplied source-over compositing and remove the binary backing
-operation. Apply Object Opacity to overlapping shadow coverage with the
-source's continuous alpha, while continuing to use Direct distance metadata to
-discard distance-zero coverage outside the source.
+During `resolve_shadow`, resample the source at each Direct work sample's exact
+distance-zero coordinate and reconstruct positive-distance extension coverage
+from the combined coverage. Store resolved extension coverage in the otherwise
+unused red channel while retaining total coverage in alpha.
 
 The alternatives were rejected as follows:
 
-- A separate root-coverage buffer would be more exact but adds a texture,
-  memory traffic, and another contract to every quality tier.
-- A dilated or supersampled source mask is heuristic and can reintroduce gaps
-  or thickness changes as size, angle, and quality change.
+- A dedicated extension buffer is the clearest representation, but adds a
+  buffer, another pass or render target, and extra memory traffic.
+- Dropping the distance-zero Direct sample is smaller, but the next ray sample
+  can be 4 source pixels away in Draft quality and create a root gap.
+- First-hit distance alone is insufficient because zero and positive-distance
+  contributions can coexist in one pixel.
 
-## Compositing Model
+No second raymarch or new cache buffer is added.
 
-Let `a` be the original source alpha and `o` be Object Opacity normalized to
-0-1. Keep all colors premultiplied.
+## Coverage Reconstruction
 
-1. Remove only unextended root coverage outside the source. A styled shadow
-   pixel is discarded when the original source alpha is zero and its Direct
-   first-hit distance is zero. Positive-distance shadow remains untouched.
-2. Attenuate shadow underneath the source by:
+For each Direct work sample, let:
 
-   `overlap_weight = 1 - a * (1 - o)`
+- `T` be the existing combined union coverage;
+- `R` be the source alpha resampled at that work sample's distance-zero pixel;
+- `E` be the union coverage contributed by positive-distance samples.
 
-   Multiply the premultiplied shadow RGBA by `overlap_weight`.
-3. Apply Object Mix and Object Opacity to the source. Its output alpha remains
-   `a * o`; Object Mix changes straight source color before repremultiplication.
-4. Composite the styled source over the attenuated shadow with the standard
-   premultiplied source-over operation.
+Direct accumulation obeys:
 
-This produces these endpoint behaviors:
+`T = R + (1 - R) * E`
 
-- `o = 1`: the shadow is not artificially masked. Source AA blends naturally
-  with the shadow behind it.
-- `o = 0`: fully covered source pixels remove the overlapping shadow, partial
-  source coverage attenuates it continuously, and positive-distance extension
-  outside the source remains visible.
-- transparent shadow: the source is rendered with its original continuous AA
-  and no backing is synthesized.
+Therefore resolve reconstructs:
 
-The existing one-byte support calculation and object-colored backing are
-removed. Object Mix affects the source contribution only. At antialiased
-boundaries, the visible result may include the shadow behind the partially
-covered source; that is intentional source-over behavior, not color dilution.
+`E = saturate((T - R) / max(1 - R, epsilon))`
+
+When `R` is effectively one, `E` is not observable from `T`; resolve stores
+zero. This is safe because a fully opaque source suppresses that location at
+Object Opacity zero and covers it through source-over at nonzero opacity.
+
+For 2x supersampling, reconstruction occurs independently for all four raw
+work samples before averaging. Averaging `T` and `R` first would not preserve
+the nonlinear union equation. Fade weight is then applied consistently to
+both total and extension coverage.
+
+The resolved metadata contract becomes:
+
+- `r`: faded positive-distance extension coverage;
+- `g`: existing faded distance-weighted total coverage;
+- `b`: existing geometry flag;
+- `a`: faded total coverage.
+
+`resolve_source_color` continues reading the raw Direct texture before this
+contract is created, so its encoded source coordinates remain unchanged.
+
+## Edge Refinement
+
+`edge_antialias` must emit the same resolved contract. For every refined
+subpixel it already recomputes total Direct coverage from the source. It will
+also sample the root alpha at the subpixel position, reconstruct extension
+coverage with the same equation, apply fade, and accumulate extension into the
+red channel.
+
+The fast non-edge path returns the resolved center unchanged. Thus both paths
+provide identical channel meanings to styling, blur metadata, and final
+compositing.
+
+## Styling and Compositing
+
+Let `o` be normalized Object Opacity. Before shadow styling, choose coverage:
+
+`C = lerp(E, T, o)`
+
+This preserves the full existing shadow at `o = 1`, uses extension-only
+coverage at `o = 0`, and restores the root contribution continuously between
+them. `style_shadow` uses `C * ShadowOpacity` as its premultiplied alpha before
+Post Smooth or Blur Shadow, so those effects process the selected shadow
+rather than an already-contaminated root silhouette.
+
+The final compositor then uses the original source alpha `a` to cut extension
+from beneath the fading object:
+
+`overlap_weight = 1 - a * (1 - o)`
+
+It multiplies the premultiplied styled shadow by this weight, applies Object
+Mix and Object Opacity to the source, and performs standard premultiplied
+source-over. The old first-hit-distance rejection is removed; the explicit
+extension channel supersedes it.
 
 ## Data Flow
 
-The existing `cache:longshadown_resolved` texture remains the source of Direct
-first-hit distance metadata for the final compositor. No new buffers or render
-passes are added.
+1. `direct_raymarch_shadow` continues producing its existing raw packed data.
+2. `resolve_source_color` consumes that raw data unchanged.
+3. `resolve_shadow` receives the raw data plus the original source texture and
+   source bounds, reconstructing total and extension coverage per work sample.
+4. `edge_antialias` preserves or recomputes the new resolved contract.
+5. `style_shadow` receives Object Opacity and styles `lerp(E, T, o)`.
+6. Existing smoothing and blur operate on that styled result.
+7. `composite_shadow` applies continuous source-overlap attenuation and normal
+   premultiplied source-over.
 
-The final compositor receives:
-
-- the styled shadow;
-- the original source texture;
-- resolved shadow metadata;
-- Object Color, Mix, and Opacity.
-
-It performs root-halo rejection, continuous overlap attenuation, source
-styling, and source-over composition in that order. Fade, texture, Blur Shadow,
-Post Smooth, and the Direct renderer remain unchanged.
+Directional, Radial, and Inverse Radial share this path. No quality routing,
+user parameter, default, saved-project value, or cache-buffer count changes.
 
 ## Behavior Matrix
 
-| Source alpha | Object Opacity | Shadow distance | Result |
+| Root coverage | Extension coverage | Object Opacity | Result |
 | ---: | ---: | ---: | --- |
-| 0 | any | 0 | Discard unextended root coverage |
-| 0 | any | greater than 0 | Keep extended shadow |
-| between 0 and 1 | 1 | any | Continuous source-over-shadow AA |
-| between 0 and 1 | 0 | any | Continuously attenuated shadow boundary |
-| 1 | 0 | any | Remove shadow under the source |
-| any | any | no shadow | Preserve source AA and Object controls |
-
-## Compatibility
-
-No user-facing parameter, default, saved-project value, quality tier, or
-renderer routing changes. The change is limited to final compositing and its
-tests. It must work identically for Directional, Radial, and Inverse Radial
-because they share the resolved distance contract.
+| greater than 0 | 0 | 0 | No colored root outline |
+| 0 | greater than 0 | 0 | Preserve extended shadow |
+| greater than 0 | greater than 0 | 0 | Preserve extension, cut it by continuous source alpha |
+| any | any | between 0 and 1 | Continuously restore root and source contributions |
+| any | any | 1 | Preserve current total shadow and normal source-over |
+| 1 | unobservable | 0 | Fully suppressed by the opaque source cutout |
 
 ## Verification
 
-Automated HLSL tests will verify:
+Automated tests will verify:
 
-- a half-covered source over an opaque differently colored shadow produces a
-  continuous mixed edge rather than an object-colored binary edge;
-- Object Opacity zero removes fully covered overlap, partially attenuates a
-  half-covered boundary, and preserves positive-distance extension;
-- a transparent shadow does not add backing or change source AA;
-- distance-zero coverage outside the source is removed while positive-distance
-  coverage is retained;
-- Object Mix changes the source contribution without normalizing partial alpha
-  back to opaque;
-- every embedded shader compiles and the full regression suite passes.
+- extension reconstruction returns zero for root-only coverage and recovers a
+  known positive extension from combined coverage;
+- 2x supersampling reconstructs each work sample before averaging;
+- a transparent center surrounded by source samples retains positive-distance
+  extension rather than being rejected by first-hit distance;
+- `style_shadow` selects extension at Object Opacity zero, total at 100%, and a
+  linear intermediate value at 50%;
+- final overlap attenuation remains continuous for fractional source alpha;
+- the old first-hit rejection is absent;
+- all embedded shaders compile and the full regression suite passes.
 
-Manual verification will compare Object Opacity at 100%, intermediate values,
-and 0% using a high-contrast shadow. It will inspect the shadow-facing edge,
-the edge opposite the extension direction, holes inside glyphs, and all three
-shadow types. Acceptance requires no binary-looking source edge, no dark or
-colored exterior fringe, a visibly antialiased boundary at Object Opacity 0,
-and no loss of the positive-distance shadow extension.
+Manual verification will compare Object Opacity at 0%, 50%, and 100% for
+Directional, Radial, and Inverse Radial, with Supersampling None and 2x. It
+will inspect the extension-facing edge, the opposite edge, curved glyphs,
+one-pixel details, and glyph holes. Acceptance requires no colored exterior
+outline, no root gap, no binary source edge, and no loss of positive-distance
+extension. Blur Shadow zero and a representative nonzero blur are both checked.
