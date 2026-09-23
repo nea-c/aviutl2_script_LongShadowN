@@ -823,6 +823,7 @@ float4 spread_blur_distance(float4 pos : SV_Position) : SV_Target {
 --[[pixelshader@composite_shadow:
 Texture2D shadow_texture : register(t0);
 Texture2D source_texture : register(t1);
+Texture2D shadow_info_texture : register(t2);
 cbuffer constant0 : register(b0) {
     float2 source_offset;
     float2 source_size;
@@ -835,6 +836,11 @@ float4 color_object(float4 source) {
     float alpha = source.a * object_opacity;
     float3 rgb = lerp(straight_rgb, object_rgb, object_mix);
     return float4(rgb * alpha, alpha);
+}
+float4 remove_unextended_shadow(float4 shadow, float4 source, float4 shadow_info) {
+    if (source.a > 1e-6 || shadow_info.a <= 1e-6) return shadow;
+    float distance = saturate(shadow_info.g / shadow_info.a);
+    return distance <= 1e-6 ? 0 : shadow;
 }
 float4 neutralize_shadow(float4 shadow, float4 source) {
     float source_support = saturate(source.a * 255);
@@ -852,11 +858,13 @@ float4 neutralize_shadow(float4 shadow, float4 source) {
 }
 float4 composite_shadow(float4 pos : SV_Position) : SV_Target {
     float4 shadow = shadow_texture[int2(pos.xy)];
+    float4 shadow_info = shadow_info_texture[int2(pos.xy)];
     int2 source_pos = int2(floor(pos.xy - source_offset));
     float4 source_sample = 0;
     if (all(source_pos >= 0) && all(source_pos < int2(source_size))) {
         source_sample = source_texture[source_pos];
     }
+    shadow = remove_unextended_shadow(shadow, source_sample, shadow_info);
     shadow = neutralize_shadow(shadow, source_sample);
     float4 source = color_object(source_sample);
     return source + shadow * (1 - source.a);
@@ -1202,6 +1210,7 @@ local object_red = math.floor(object_color / 65536) % 256 / 255
 local object_green = math.floor(object_color / 256) % 256 / 255
 local object_blue = object_color % 256 / 255
 obj.pixelshader("composite_shadow", "object",
-    { "cache:longshadown_final", "cache:longshadown_source" },
+    { "cache:longshadown_final", "cache:longshadown_source",
+      "cache:longshadown_resolved" },
     { source_offset_x, source_offset_y, source_w, source_h,
       object_red, object_green, object_blue, object_mix / 100, object_opacity / 100 }, "copy")

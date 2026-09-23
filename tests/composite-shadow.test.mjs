@@ -610,6 +610,38 @@ test("distance field is smoothed in both axes before either color blur pass", ()
   );
 });
 
+test("zero-distance Direct coverage is hidden outside the source", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const removeUnextendedShadow = extractFunction(source, "remove_unextended_shadow");
+  const assembly = compileConstantResult(`
+${removeUnextendedShadow}
+
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float4 shadow = float4(0.25, 0.5, 0.75, 0.5);
+    float4 transparent_source = 0;
+    float4 supported_source = float4(0.25, 0.25, 0.25, 0.25);
+    float4 root_info = float4(0.25, 0, 1, 0.5);
+    float4 extended_info = float4(0.25, 0.125, 1, 0.5);
+    float4 removed = remove_unextended_shadow(
+        shadow, transparent_source, root_info);
+    float4 extended = remove_unextended_shadow(
+        shadow, transparent_source, extended_info);
+    float4 source_backed = remove_unextended_shadow(
+        shadow, supported_source, root_info);
+    bool correct = all(abs(removed) < 1e-6)
+        && all(abs(extended - shadow) < 1e-6)
+        && all(abs(source_backed - shadow) < 1e-6);
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+
+  assert.match(
+    assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+    "zero-distance coverage leaked outside the source or removed extended shadow",
+  );
+});
+
 test("shadow-backed edges avoid fringes without filling transparent edges", () => {
   const source = readFileSync(scriptPath, "utf8");
   const neutralizeShadow = extractFunction(source, "neutralize_shadow");
