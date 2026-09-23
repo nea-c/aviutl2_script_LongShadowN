@@ -668,44 +668,35 @@ test("resolve shadow constants preserve HLSL register alignment", () => {
     "Lua did not supply the HLSL padding slot before source_size");
 });
 
-test("edge refinement emits extension coverage in resolved red", () => {
+test("edge refinement emits correlated difference coverage in resolved red", () => {
   const source = readFileSync(scriptPath, "utf8");
   const shader = source.match(
     /--\[\[pixelshader@edge_antialias:([\s\S]*?)\]\]/)?.[1];
   assert.ok(shader, "edge_antialias shader was not found");
   assert.match(shader,
-    /accumulate_shadow_coverages\(\s*sample_alpha,\s*distance,\s*coverage,\s*extension_coverage\s*\)/,
-    "edge refinement did not accumulate positive-distance coverage independently");
+    /float root_alpha\s*=\s*sample_source_alpha\(pixel\)/,
+    "refinement did not sample root coverage at the refined subpixel");
   assert.match(shader,
-    /float4 contribution\s*=\s*float4\(extension_coverage \* weight,/);
+    /float shadow_only\s*=\s*shadow_only_coverage\(\s*extension_coverage,\s*root_alpha\s*\)/,
+    "refinement did not subtract correlated root coverage");
+  assert.match(shader,
+    /float4 contribution\s*=\s*float4\(shadow_only \* weight,/);
 });
 
-test("opaque roots force independent positive-distance refinement", () => {
+test("opaque non-edge roots keep the fast path", () => {
   const source = readFileSync(scriptPath, "utf8");
   const shader = source.match(
     /--\[\[pixelshader@edge_antialias:([\s\S]*?)\]\]/)?.[1];
   assert.ok(shader, "edge_antialias shader was not found");
+  assert.doesNotMatch(shader, /opaque_root_requires_refine/);
   assert.match(shader,
-    /bool opaque_root_requires_refine\s*=\s*sample_source_alpha\(pos\.xy\)\s*>=\s*0\.9999\s*&&\s*center\.a\s*>\s*0\.0001/);
-  assert.match(shader,
-    /if \(!geometry_edge && !fade_edge && !opaque_root_requires_refine\) return center;/);
+    /if \(!geometry_edge && !fade_edge\) return center;/,
+    "non-edge opaque roots still enter the expensive refined raymarch");
+});
 
-  const accumulate = extractFunction(
-    source, "accumulate_shadow_coverages", "void");
-  const assembly = compileConstantResult(`
-${accumulate}
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float total = 0;
-    float extension = 0;
-    accumulate_shadow_coverages(1, 0, total, extension);
-    accumulate_shadow_coverages(1, 0.5, total, extension);
-    bool correct = abs(total - 1) < 1e-6 && abs(extension - 1) < 1e-6;
-    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-}
-`);
-  assert.match(assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-    "opaque root coverage discarded its positive-distance extension");
+test("coverage difference does not alter quality sample spacing", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  assert.doesNotMatch(source, /extension_sample_alpha|minimum_travel/);
 });
 
 test("Object Opacity selects extension before shadow styling", () => {
