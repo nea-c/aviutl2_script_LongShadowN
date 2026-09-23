@@ -76,40 +76,43 @@ This is required because adjacent ray samples often observe the same
 antialiased silhouette coverage. Source-over would amplify repeated `0.5`
 samples toward one and falsely turn them into new geometry.
 
-Let `T` be the maximum coverage across all ray samples and `R` the source
-coverage at the exact distance-zero coordinate. The absolute and stored
-conditional shadow coverages are:
+Let `A_i` be one ray sample's coverage, `d_i` its normalized distance, and `R`
+the source coverage at the exact distance-zero coordinate. Each sample forms:
 
-`D = saturate(T - R)`
+`D_i = saturate(A_i - R)`
 
-`C = R < 1 ? D / (1 - R) : 0`
+`C_i = R < 1 ? D_i / (1 - R) : 0`
 
-For 2x supersampling, `R`, `E`, `D`, and `C` are resolved independently for every
-raw work sample before the four results are averaged. Computing the difference
-after averaging loses the nonlinear set relationship and can recreate a halo.
+`F_i = C_i * fade_weight(d_i)`
+
+The ray stores `F = max(F_i)` and the distance/source coordinate belonging to
+the winning sample. Applying Fade after selecting the first hit is invalid: a
+weak antialiased hit can then choose the Fade distance for stronger geometry
+later on the ray, producing a step wherever that weak hit appears or disappears.
+
+For 2x supersampling, this complete per-ray result is computed independently
+for every raw work sample before the four results are averaged.
 
 When `R` is effectively one, `D` is zero by definition. No hidden extension
 needs to be reconstructed because set difference cannot exceed fully opaque
 root coverage at that sample. The previous forced full-interior re-raymarch
 for opaque roots is therefore removed, avoiding its performance cost.
 
-Fade is applied consistently after `C` is formed. The resolved metadata
-contract becomes:
+The resolved metadata contract becomes:
 
-- `r`: faded conditional shadow-only coverage `C`;
-- `g`: existing faded distance-weighted total coverage;
+- `r`: faded conditional shadow-only coverage `F`;
+- `g`: winning distance multiplied by `F`;
 - `b`: existing geometry flag;
-- `a`: faded total coverage `T`.
+- `a`: `F`, used to normalize the winning distance.
 
-`resolve_source_color` continues consuming the raw Direct texture before this
-contract is produced, so its encoded source-coordinate behavior is unchanged.
+`resolve_source_color` consumes the source coordinate selected by the same
+winning faded sample, keeping color and distance aligned with coverage.
 
 ## Edge Refinement
 
-`edge_antialias` must emit the same metadata contract as `resolve_shadow`.
-Every refined subpixel accumulates positive-distance coverage `E` with `max`,
-samples its matching root coverage `R`, computes `D = saturate(E - R)`, and
-stores `C = D / (1 - R)` when `R < 1`.
+`edge_antialias` must emit the same metadata contract as the Direct pass.
+Every refined subpixel computes `F_i` for each ray sample and retains the
+maximum together with its matching distance.
 
 The difference is computed per refined sample before averaging. Both the fast
 non-edge path and the refined path therefore expose identical channel meanings
@@ -122,10 +125,10 @@ changed.
 
 ## Styling and Final Compositing
 
-`style_shadow` always consumes resolved red coverage `C`. Object Opacity does
+`style_shadow` always consumes resolved red coverage `F`. Object Opacity does
 not select between extension and total coverage, because restoring total
 coverage would restore the source-shaped colored outline. Shadow color,
-texture, Shadow Opacity, Post Smooth, and Blur Shadow all operate on `C`.
+texture, Shadow Opacity, Post Smooth, and Blur Shadow all operate on `F`.
 
 Post-processing can spread styled shadow back beneath the source footprint.
 The final compositor converts conditional coverage back to the source's
@@ -142,12 +145,13 @@ This also masks filter spill continuously without a binary cutout.
 
 ## Data Flow
 
-1. `direct_raymarch_shadow` produces its existing raw packed data.
-2. `resolve_source_color` consumes the raw source-coordinate data unchanged.
-3. `resolve_shadow` obtains `R`, computes per-sample `D = saturate(T - R)` and
-   `C = D / (1 - R)`, and writes the new resolved metadata contract.
-4. `edge_antialias` preserves or recomputes the same per-sample `C` contract.
-5. `style_shadow` styles only `C`, independent of Object Opacity.
+1. `direct_raymarch_shadow` computes conditional coverage and Fade for every
+   ray sample, retains the maximum `F`, and packs its distance/source coordinate.
+2. `resolve_source_color` consumes the winning source coordinate.
+3. `resolve_shadow` averages completed raw results for 2x supersampling and
+   does not apply Fade again.
+4. `edge_antialias` recomputes the same per-sample `F` contract.
+5. `style_shadow` styles only `F`, independent of Object Opacity.
 6. Existing smoothing and blur operate on the styled shadow-only result.
 7. `composite_shadow` applies continuous overlap attenuation and normal
    premultiplied source-over.
@@ -166,7 +170,8 @@ unchanged.
 | 0.6 | 0.2 | 0 | 0 | Clamp non-protruding coverage |
 | 1 | any | 0 | 0 | No forced opaque-root re-raymarch |
 
-Object Opacity 0%, 50%, and 100% all use the same `C` and reconstruct the same
+Object Opacity 0%, 50%, and 100% all use the same faded conditional coverage
+and reconstruct the same
 absolute `D`. The parameter changes the source contribution, never the
 definition of shadow geometry.
 
@@ -179,11 +184,14 @@ Automated tests will verify:
   `(0.2, 0.6)`;
 - `conditional_shadow_coverage(E, R)` produces `0.6` for `(0.8, 0.5)` and
   safely produces zero for a fully covered root;
+- a weak near hit followed by a strong far hit produces the same faded result
+  regardless of sample order;
+- `resolve_shadow` does not apply Fade a second time;
 - 2x resolution computes `D` per raw work sample before averaging, using input
   values where averaging first would produce a different result;
 - edge refinement uses the same per-sample difference contract;
 - fully opaque roots do not force an otherwise unnecessary re-raymarch;
-- `style_shadow` consumes `C` at Object Opacity 0%, 50%, and 100%;
+- `style_shadow` consumes `F` at Object Opacity 0%, 50%, and 100%;
 - no Ultra-specific distance threshold remains;
 - final composition reconstructs the same absolute `D` at Object Opacity 0%,
   50%, and 100%;

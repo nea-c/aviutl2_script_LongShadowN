@@ -91,6 +91,8 @@ cbuffer constant0 : register(b0) {
     float shadow_type;
     float quality_step;
     float work_scale;
+    float fade_in;
+    float fade_out;
 };
 float sample_source_alpha_direct(float2 pixel) {
     float2 local = pixel - source_offset;
@@ -100,6 +102,39 @@ float sample_source_alpha_direct(float2 pixel) {
 }
 float union_coverage(float coverage, float sample_alpha) {
     return max(coverage, saturate(sample_alpha));
+}
+float shadow_only_coverage(float extension_coverage,
+    float root_coverage) {
+    return saturate(extension_coverage - saturate(root_coverage));
+}
+float conditional_shadow_coverage(float extension_coverage,
+    float root_coverage) {
+    float root = saturate(root_coverage);
+    float uncovered = 1 - root;
+    if (uncovered <= 1e-6) return 0;
+    return shadow_only_coverage(extension_coverage, root)
+        / max(uncovered, 1e-6);
+}
+float fade_weight_sample(float distance) {
+    float root = 1;
+    if (fade_in < 0.9999) {
+        root = smoothstep(0, max(1 - fade_in, 1e-6), distance);
+    }
+    float tip = 1;
+    if (fade_out > 0.0001) {
+        tip = smoothstep(0, fade_out, 1 - distance);
+    }
+    return root * tip;
+}
+bool accumulate_faded_shadow_sample(float sample_alpha, float root_alpha,
+    float distance, inout float coverage, inout float weighted_distance) {
+    float candidate = conditional_shadow_coverage(
+        sample_alpha, root_alpha) * fade_weight_sample(distance);
+    float combined = union_coverage(coverage, candidate);
+    if (combined <= coverage + 1e-7) return false;
+    coverage = combined;
+    weighted_distance = distance * combined;
+    return true;
 }
 bool clip_parameter_axis(float origin, float delta, float bounds_min,
     float bounds_max, inout float interval_min, inout float interval_max) {
@@ -219,10 +254,10 @@ float4 direct_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
 
     int active_samples = min(8001,
         max(2, (int)ceil(source_span * work_scale / quality_step) + 1));
+    float root_alpha = sample_source_alpha_direct(pixel);
     float coverage = 0;
-    float first_distance = 1;
-    float2 first_source_coordinate = 0;
-    bool found_source = false;
+    float weighted_distance = 0;
+    float2 selected_source_coordinate = 0;
     [loop]
     for (int sample = 0; sample < 8001; ++sample) {
         if (sample >= active_samples) break;
@@ -239,19 +274,17 @@ float4 direct_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
             distance = projection_distance_from_u(target_scale, parameter);
         }
         float sample_alpha = sample_source_alpha_direct(source_pixel);
-        if (sample_alpha > 0.0001 && !found_source) {
-            found_source = true;
-            first_distance = distance;
+        if (accumulate_faded_shadow_sample(sample_alpha, root_alpha, distance,
+                coverage, weighted_distance)) {
             float2 source_local = clamp(floor(source_pixel - source_offset),
                 0, source_size - 1);
-            first_source_coordinate = 0.125
+            selected_source_coordinate = 0.125
                 + 0.75 * (source_local + 0.5) / source_size;
         }
-        coverage = union_coverage(coverage, sample_alpha);
         if (coverage >= 0.9999) break;
     }
-    return float4(first_source_coordinate.x, first_distance * coverage,
-        first_source_coordinate.y, coverage);
+    return float4(selected_source_coordinate.x, weighted_distance,
+        selected_source_coordinate.y, coverage);
 }
 ]]
 
@@ -307,21 +340,29 @@ float conditional_shadow_coverage(float extension_coverage,
     float root = saturate(root_coverage);
     float uncovered = 1 - root;
     if (uncovered <= 1e-6) return 0;
-    return shadow_only_coverage(extension_coverage, root) / uncovered;
+    return shadow_only_coverage(extension_coverage, root)
+        / max(uncovered, 1e-6);
 }
-void accumulate_shadow_coverages(float sample_alpha, float distance,
-    inout float total_coverage, inout float extension_coverage) {
-    total_coverage = union_coverage(total_coverage, sample_alpha);
-    if (distance > 1e-6) {
-        extension_coverage = union_coverage(extension_coverage, sample_alpha);
+float fade_weight_sample(float distance) {
+    float root = 1;
+    if (fade_in < 0.9999) {
+        root = smoothstep(0, max(1 - fade_in, 1e-6), distance);
     }
-}
-float fade_weight_aa(float distance) {
-    float root = fade_in >= 0.9999 ? 1
-        : smoothstep(0, max(1 - fade_in, 1e-6), distance);
-    float tip = fade_out <= 0.0001 ? 1
-        : smoothstep(0, fade_out, 1 - distance);
+    float tip = 1;
+    if (fade_out > 0.0001) {
+        tip = smoothstep(0, fade_out, 1 - distance);
+    }
     return root * tip;
+}
+bool accumulate_faded_shadow_sample(float sample_alpha, float root_alpha,
+    float distance, inout float coverage, inout float weighted_distance) {
+    float candidate = conditional_shadow_coverage(
+        sample_alpha, root_alpha) * fade_weight_sample(distance);
+    float combined = union_coverage(coverage, candidate);
+    if (combined <= coverage + 1e-7) return false;
+    coverage = combined;
+    weighted_distance = distance * combined;
+    return true;
 }
 bool clip_parameter_axis(float origin, float delta, float bounds_min,
     float bounds_max, inout float interval_min, inout float interval_max) {
@@ -464,10 +505,8 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
         float2 pixel = pos.xy + refine_offset(i);
         float root_alpha = sample_source_alpha(pixel);
         float coverage = 0;
-        float extension_coverage = 0;
-        float first_distance = 1;
-        float first_alpha = 0;
-        bool found_source = false;
+        float weighted_distance = 0;
+        bool found_shadow = false;
         float active_sample_count = sample_count;
         int active_samples = 2;
         float start_parameter = 0;
@@ -515,22 +554,14 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
                     - direction * (distance * total_length);
             }
             float sample_alpha = sample_source_alpha(source_pixel);
-            if (sample_alpha > 0.0001 && !found_source) {
-                first_distance = distance;
-                first_alpha = sample_alpha;
-                found_source = true;
+            if (accumulate_faded_shadow_sample(sample_alpha, root_alpha,
+                    distance, coverage, weighted_distance)) {
+                found_shadow = true;
             }
-            accumulate_shadow_coverages(sample_alpha, distance,
-                coverage, extension_coverage);
-            if (coverage >= 0.9999 && extension_coverage >= 0.9999) break;
+            if (coverage >= 0.9999) break;
         }
-        float shadow_only = conditional_shadow_coverage(
-            extension_coverage, root_alpha);
-        float weight = fade_weight_aa(first_distance);
-        float weighted_coverage = coverage * weight;
-        float4 contribution = float4(shadow_only * weight,
-            first_distance * weighted_coverage,
-            found_source ? 1 : 0, weighted_coverage);
+        float4 contribution = float4(coverage, weighted_distance,
+            found_shadow ? 1 : 0, coverage);
         refined += contribution;
     }
     return refined / refine_samples;
@@ -709,33 +740,12 @@ cbuffer constant0 : register(b0) {
     float source_padding;
     float2 source_size;
 };
-float sample_root_alpha(float2 pixel) {
-    float2 local = pixel - source_offset;
-    if (any(local < 0) || any(local >= source_size)) return 0;
-    return saturate(source_texture.SampleLevel(linear_sampler,
-        local / source_size, 0).a);
-}
-float shadow_only_coverage(float extension_coverage,
-    float root_coverage) {
-    return saturate(extension_coverage - saturate(root_coverage));
-}
-float conditional_shadow_coverage(float extension_coverage,
-    float root_coverage) {
-    float root = saturate(root_coverage);
-    float uncovered = 1 - root;
-    if (uncovered <= 1e-6) return 0;
-    return shadow_only_coverage(extension_coverage, root) / uncovered;
-}
-float fade_weight(float distance) {
-    float root = fade_in >= 0.9999 ? 1
-        : smoothstep(0, max(1 - fade_in, 1e-6), distance);
-    float tip = fade_out <= 0.0001 ? 1
-        : smoothstep(0, fade_out, 1 - distance);
-    return root * tip;
+float4 resolve_faded_shadow_info(float4 shadow_info) {
+    float geometry = shadow_info.r > 0.01 && shadow_info.b > 0.01 ? 1 : 0;
+    return float4(shadow_info.a, shadow_info.g, geometry, shadow_info.a);
 }
 float4 resolve_shadow(float4 pos : SV_Position) : SV_Target {
     float4 shadow_info;
-    float shadow_only = 0;
     if (work_scale >= 1.5) {
         int2 base = int2(pos.xy) * 2;
         shadow_info = 0;
@@ -745,25 +755,14 @@ float4 resolve_shadow(float4 pos : SV_Position) : SV_Target {
             for (int x = 0; x < 2; ++x) {
                 int2 work_position = base + int2(x, y);
                 float4 sample_info = shadow_texture[work_position];
-                float2 pixel = (float2(work_position) + 0.5) / work_scale;
-                float root_alpha = sample_root_alpha(pixel);
-                shadow_only += conditional_shadow_coverage(
-                    sample_info.a, root_alpha);
                 shadow_info += sample_info;
             }
         }
         shadow_info /= 4;
-        shadow_only /= 4;
     } else {
         shadow_info = shadow_texture[int2(pos.xy)];
-        float root_alpha = sample_root_alpha(pos.xy / work_scale);
-        shadow_only = conditional_shadow_coverage(shadow_info.a, root_alpha);
     }
-    float distance = saturate(shadow_info.g / max(shadow_info.a, 1e-6));
-    float weight = fade_weight(distance);
-    float geometry = shadow_info.r > 0.01 && shadow_info.b > 0.01 ? 1 : 0;
-    return float4(shadow_only * weight, shadow_info.g * weight,
-        geometry, shadow_info.a * weight);
+    return resolve_faded_shadow_info(shadow_info);
 }
 ]]
 
@@ -1152,7 +1151,8 @@ local function render_direct_shadow(buffer_w, buffer_h,
         { buffer_w, buffer_h, source_offset_x, source_offset_y,
           source_w, source_h, source_pos_x, source_pos_y,
           math.cos(math.rad(angle)), math.sin(math.rad(angle)),
-          shadow_length, target_scale, shadow_type, quality_step, work_scale },
+          shadow_length, target_scale, shadow_type, quality_step, work_scale,
+          fade_in / 100, fade_out / 100 },
         "copy", "clamp")
     return target_scale, refine_sample_count, quality_step
 end

@@ -281,7 +281,7 @@ test("Direct shader and Lua renderer share the packed source contract", () => {
   assert.match(shader[1], /Texture2D source_texture : register\(t0\)/);
   assert.match(
     shader[1],
-    /return float4\(first_source_coordinate\.x, first_distance \* coverage,\s*first_source_coordinate\.y, coverage\)/,
+    /return float4\(selected_source_coordinate\.x, weighted_distance,\s*selected_source_coordinate\.y, coverage\)/,
   );
   assert.match(
     shader[1],
@@ -446,10 +446,10 @@ test("fade controls expose percent values while shaders receive normalized value
   assert.deepEqual(readTrack("fade_in"), [0, 100, 100]);
   assert.deepEqual(readTrack("fade_out"), [0, 100, 50]);
 
-  const resolveCall = source.match(
-    /obj\.pixelshader\("resolve_shadow"[\s\S]*?\{ buffer_w, buffer_h, ([^,]+), ([^,]+), work_scale,/,
+  const directCall = source.match(
+    /obj\.pixelshader\("direct_raymarch_shadow"[\s\S]*?quality_step, work_scale,\s*([^,]+), ([^}]+) \}/,
   );
-  assert.ok(resolveCall, "resolve_shadow call was not found");
+  assert.ok(directCall, "direct_raymarch_shadow call was not found");
   const antialiasCall = source.match(
     /obj\.pixelshader\("edge_antialias"[\s\S]*?refine_samples,\s*([^,]+), ([^,]+), effective_quality/,
   );
@@ -457,8 +457,8 @@ test("fade controls expose percent values while shaders receive normalized value
   const evaluate = (expression, fadeIn, fadeOut) => Function(
     "fade_in", "fade_out", `return ${expression};`,
   )(fadeIn, fadeOut);
-  assert.equal(evaluate(resolveCall[1], 100, 50), 1);
-  assert.equal(evaluate(resolveCall[2], 100, 50), 0.5);
+  assert.equal(evaluate(directCall[1], 100, 50), 1);
+  assert.equal(evaluate(directCall[2], 100, 50), 0.5);
   assert.equal(evaluate(antialiasCall[1], 100, 50), 1);
   assert.equal(evaluate(antialiasCall[2], 100, 50), 0.5);
 });
@@ -612,7 +612,7 @@ test("distance field is smoothed in both axes before either color blur pass", ()
 
 test("correlated coverage difference removes only the shared root", () => {
   const source = readFileSync(scriptPath, "utf8");
-  for (const shaderName of ["edge_antialias", "resolve_shadow"]) {
+  for (const shaderName of ["direct_raymarch_shadow", "edge_antialias"]) {
     const shader = source.match(
       new RegExp(`--\\[\\[pixelshader@${shaderName}:([\\s\\S]*?)\\]\\]`),
     )?.[1];
@@ -635,9 +635,91 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
   }
 });
 
+test("fade is accumulated per ray sample without first-hit discontinuities", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  for (const shaderName of ["direct_raymarch_shadow", "edge_antialias"]) {
+    const shader = source.match(
+      new RegExp(`--\\[\\[pixelshader@${shaderName}:([\\s\\S]*?)\\]\\]`),
+    )?.[1];
+    assert.ok(shader, `${shaderName} shader was not found`);
+    const union = extractFunction(shader, "union_coverage", "float");
+    const difference = extractFunction(
+      shader, "shadow_only_coverage", "float");
+    const conditional = extractFunction(
+      shader, "conditional_shadow_coverage", "float");
+    const fade = extractFunction(shader, "fade_weight_sample", "float");
+    const accumulate = extractFunction(
+      shader, "accumulate_faded_shadow_sample", "bool");
+    const assembly = compileConstantResult(`
+static const float fade_in = 0;
+static const float fade_out = 0;
+${union}
+${difference}
+${conditional}
+${fade}
+${accumulate}
+float2 accumulate_forward() {
+    float coverage = 0;
+    float weighted_distance = 0;
+    accumulate_faded_shadow_sample(0.1, 0, 0.25,
+        coverage, weighted_distance);
+    accumulate_faded_shadow_sample(1.0, 0, 0.75,
+        coverage, weighted_distance);
+    return float2(coverage, weighted_distance);
+}
+float2 accumulate_reverse() {
+    float coverage = 0;
+    float weighted_distance = 0;
+    accumulate_faded_shadow_sample(1.0, 0, 0.75,
+        coverage, weighted_distance);
+    accumulate_faded_shadow_sample(0.1, 0, 0.25,
+        coverage, weighted_distance);
+    return float2(coverage, weighted_distance);
+}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float2 forward = accumulate_forward();
+    float2 reverse = accumulate_reverse();
+    bool correct = all(abs(forward - float2(0.84375, 0.6328125)) < 1e-6)
+        && all(abs(reverse - forward) < 1e-6);
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+    assert.match(assembly,
+      /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+      `${shaderName} let a weak first hit choose Fade for a stronger later hit`);
+    assert.doesNotMatch(shader, /first_distance/,
+      `${shaderName} still applies one first-hit Fade weight to the whole ray`);
+  }
+});
+
+test("resolved shadow does not apply Fade a second time", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@resolve_shadow:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(shader, "resolve_shadow shader was not found");
+  const resolveFaded = extractFunction(
+    shader, "resolve_faded_shadow_info", "float4");
+  const assembly = compileConstantResult(`
+${resolveFaded}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float4 result = resolve_faded_shadow_info(
+        float4(0.2, 0.6328125, 0.3, 0.84375));
+    bool correct = all(abs(result
+        - float4(0.84375, 0.6328125, 1, 0.84375)) < 1e-6);
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+  assert.match(assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+    "resolve_shadow attenuated already-faded ray coverage");
+  assert.match(shader,
+    /return resolve_faded_shadow_info\(shadow_info\);/,
+    "resolve_shadow bypassed the single-Fade resolve contract");
+});
+
 test("conditional shadow coverage fills the uncovered root fraction", () => {
   const source = readFileSync(scriptPath, "utf8");
-  for (const shaderName of ["edge_antialias", "resolve_shadow"]) {
+  for (const shaderName of ["direct_raymarch_shadow", "edge_antialias"]) {
     const shader = source.match(
       new RegExp(`--\\[\\[pixelshader@${shaderName}:([\\s\\S]*?)\\]\\]`),
     )?.[1];
@@ -674,8 +756,6 @@ test("ray union does not amplify repeated antialiased coverage", () => {
 
   const directUnion = extractFunction(directShader, "union_coverage", "float");
   const edgeUnion = extractFunction(edgeShader, "union_coverage", "float");
-  const accumulate = extractFunction(
-    edgeShader, "accumulate_shadow_coverages", "void");
   const difference = extractFunction(
     edgeShader, "shadow_only_coverage", "float");
   const assembly = compileConstantResult(`
@@ -691,18 +771,11 @@ float direct_case() {
     return abs(flat) < 1e-6 && abs(protruding - 0.3) < 1e-6;
 }
 ${edgeUnion.replaceAll("union_coverage", "edge_union_coverage")}
-${accumulate.replaceAll("union_coverage", "edge_union_coverage")}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float total = 0;
-    float extension = 0;
-    accumulate_shadow_coverages(0.5, 0, total, extension);
-    accumulate_shadow_coverages(0.5, 0.25, total, extension);
-    accumulate_shadow_coverages(0.5, 0.5, total, extension);
-    float flat = shadow_only_coverage(extension, 0.5);
-    accumulate_shadow_coverages(0.8, 0.75, total, extension);
-    float protruding = shadow_only_coverage(extension, 0.5);
-    bool correct = direct_case() != 0 && abs(flat) < 1e-6
-        && abs(protruding - 0.3) < 1e-6;
+    float repeated = edge_union_coverage(0, 0.5);
+    repeated = edge_union_coverage(repeated, 0.5);
+    repeated = edge_union_coverage(repeated, 0.5);
+    bool correct = direct_case() != 0 && abs(repeated - 0.5) < 1e-6;
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
@@ -711,31 +784,27 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     "repeated samples amplified a non-extending antialiased edge");
 });
 
-test("shadow-only coverage is differenced before 2x averaging", () => {
+test("2x resolve averages already-faded per-sample coverage", () => {
   const source = readFileSync(scriptPath, "utf8");
-  const difference = extractFunction(source, "shadow_only_coverage", "float");
+  const shader = source.match(
+    /--\[\[pixelshader@resolve_shadow:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(shader, "resolve_shadow shader was not found");
+  const resolveFaded = extractFunction(
+    shader, "resolve_faded_shadow_info", "float4");
   const assembly = compileConstantResult(`
-${difference}
+${resolveFaded}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float per_sample = (shadow_only_coverage(0.1, 0.9)
-        + shadow_only_coverage(0.9, 0.1)) * 0.5;
-    float after_average = shadow_only_coverage(0.5, 0.5);
-    bool correct = abs(per_sample - 0.4) < 1e-6
-        && abs(after_average) < 1e-6;
+    float4 averaged = (float4(0.2, 0.1, 0.3, 0.2)
+        + float4(0.4, 0.6, 0.5, 0.8)) * 0.5;
+    float4 result = resolve_faded_shadow_info(averaged);
+    bool correct = all(abs(result - float4(0.5, 0.35, 1, 0.5)) < 1e-6);
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
   assert.match(assembly,
     /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/);
-
-  const shader = source.match(
-    /--\[\[pixelshader@resolve_shadow:([\s\S]*?)\]\]/)?.[1];
-  assert.ok(shader, "resolve_shadow shader was not found");
-  const perSampleDifference = shader.search(
-    /conditional_shadow_coverage\(\s*sample_info\.a,\s*root_alpha\)/);
-  const averaging = shader.indexOf("shadow_only /= 4");
-  assert.ok(perSampleDifference >= 0 && averaging > perSampleDifference,
-    "2x resolve averaged correlated coverages before subtraction");
+  assert.match(shader, /shadow_info \/= 4;[\s\S]*return resolve_faded_shadow_info\(shadow_info\);/,
+    "2x resolve did not average completed per-sample Fade results");
 });
 
 test("resolve shadow constants preserve HLSL register alignment", () => {
@@ -751,7 +820,7 @@ test("resolve shadow constants preserve HLSL register alignment", () => {
     "Lua did not supply the HLSL padding slot before source_size");
 });
 
-test("edge refinement emits correlated difference coverage in resolved red", () => {
+test("edge refinement emits per-sample faded coverage in resolved red", () => {
   const source = readFileSync(scriptPath, "utf8");
   const shader = source.match(
     /--\[\[pixelshader@edge_antialias:([\s\S]*?)\]\]/)?.[1];
@@ -760,10 +829,10 @@ test("edge refinement emits correlated difference coverage in resolved red", () 
     /float root_alpha\s*=\s*sample_source_alpha\(pixel\)/,
     "refinement did not sample root coverage at the refined subpixel");
   assert.match(shader,
-    /float shadow_only\s*=\s*conditional_shadow_coverage\(\s*extension_coverage,\s*root_alpha\s*\)/,
-    "refinement did not normalize correlated coverage into the uncovered root");
+    /accumulate_faded_shadow_sample\(sample_alpha, root_alpha,\s*distance, coverage, weighted_distance\)/,
+    "refinement did not apply Fade to each correlated ray sample");
   assert.match(shader,
-    /float4 contribution\s*=\s*float4\(shadow_only \* weight,/);
+    /float4 contribution\s*=\s*float4\(coverage, weighted_distance,/);
 });
 
 test("opaque non-edge roots keep the fast path", () => {

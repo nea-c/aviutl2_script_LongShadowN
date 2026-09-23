@@ -6,6 +6,11 @@
 > supersedes the earlier `r = D` and overlap-weight details below; see the
 > companion design document for the current contract.
 
+> Fade correction: Fade is now evaluated for every ray sample before the
+> `max` union. The raw pass retains the strongest faded conditional sample and
+> its matching distance/source coordinate; `resolve_shadow` must not apply
+> Fade again. This supersedes all `first_distance * coverage` steps below.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Remove the colored source-outline artifact by styling only the per-sample correlated coverage difference `D = saturate(E - R)`.
