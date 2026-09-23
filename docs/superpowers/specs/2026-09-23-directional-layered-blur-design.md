@@ -53,20 +53,22 @@ evaluate the same ray twice with a layer selector; no new user-facing control
 is added.
 
 The front coverage is the running maximum of faded, root-corrected samples in
-its interval. Rear coverage is the running maximum of later samples. Convert
-the rear value to the residual coverage required to reproduce the current
-single-layer maximum before blur: if `front < 1`,
-`rear_residual = max(0, max(front, rear) - front) / (1 - front)`; otherwise it
-is zero. This prevents double-counting correlated samples when the layers are
-composited. Each layer's distance is accumulated from the coverage increments
-that belong to that layer, so its blur radius does not inherit another layer's
-distance.
+its interval. Rear coverage is the running maximum of later samples. Preserve
+the **raw rear layer through blur**, even where the front is opaque: rear blur
+must be able to spread beyond the front silhouette. Each layer's distance is
+accumulated from only its own coverage increments, so its blur radius does not
+inherit another layer's distance. After blur, retain only rear coverage not
+already covered by front. For front alpha `F` and rear alpha `R`, the visible
+rear premultiplied color/alpha is multiplied by
+`max(0, R - F) / max(R, 1e-6)`; the combined alpha is `max(F, R)`. This matches
+the current max-union alpha before blur, avoids double-counting correlated
+samples, and keeps rear blur present until the last possible stage.
 
 Resolve, edge-refine, source-color, style, distance-spread, and two-axis blur
 each layer independently. Reuse existing shaders where their single-layer
 contract still holds; add only the layer selection and final layer-combine
-logic needed by the trial. Combine blurred rear behind blurred front in
-premultiplied alpha, apply global Shadow Opacity exactly once, then run the
+logic needed by the trial. Combine blurred rear behind blurred front using
+the residual rule above, apply global Shadow Opacity exactly once, then run the
 existing `composite_shadow` so the original object stays in front and its AA
 coverage still clips the shadow. Texture alpha, source-color mixing, and Fade
 must not be applied twice. Scratch buffers must be initialized for every
@@ -94,7 +96,8 @@ Automated tests must first fail for the current implementation and then cover:
 
 - a near/far ray with different distances retaining separate coverage and
   distance metadata;
-- the unblurred recomposition matching the current maximum-coverage result;
+- the unblurred recomposition matching the current maximum-coverage result,
+  while opaque-front pixels retain raw rear data before blur;
 - no hard transition at a global distance such as 0.5;
 - Fade 50 and root subtraction working independently in both layers;
 - Directional-only dispatch when Blur Shadow is positive, plus unchanged
