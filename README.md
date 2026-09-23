@@ -14,7 +14,8 @@
 
 - r11
   - r10で発生していたFade値の問題を修正
-  - BlurShadowパラメータの適応がおかしい問題を修正
+  - 問題がありすぎたので`Blur Shadow`パラメータを削除
+  - Directional時限定で`Softness`パラメータを追加
   - TextureグループのOpacityを削除(存在価値が不明)
   - FadeInの数値適応のしかたを反転(0でなし)
 

@@ -296,7 +296,7 @@ test("Direct shader and Lua renderer share the packed source contract", () => {
     /local function render_direct_shadow\([\s\S]*?\r?\nend/,
   );
   assert.ok(renderer, "render_direct_shadow was not found");
-  assert.match(renderer[0], /obj\.pixelshader\("direct_raymarch_shadow"/);
+  assert.match(renderer[0], /legacy_blur and "legacy_direct_raymarch_shadow"\s*or "direct_raymarch_shadow"/);
   assert.match(renderer[0], /return target_scale, refine_sample_count, quality_step/);
 });
 
@@ -330,7 +330,7 @@ test("Lua direct renderer and routing match the approved matrix", () => {
   assert.ok(renderer, "render_direct_shadow was not found");
   assert.match(renderer[0], /local target_scale, effective_length = 1, shadow_length/);
   assert.match(renderer[0], /if shadow_type >= 1 then[\s\S]*?get_radial_projection/);
-  assert.match(renderer[0], /obj\.pixelshader\("direct_raymarch_shadow"/);
+  assert.match(renderer[0], /legacy_blur and "legacy_direct_raymarch_shadow"\s*or "direct_raymarch_shadow"/);
   assert.match(renderer[0], /return target_scale, refine_sample_count, quality_step/);
 
   const dispatch = source.match(
@@ -428,7 +428,7 @@ test("edge refinement mirrors generalized Direct traversal", () => {
   assert.match(style[0], /direct_quality_step = direct_quality_step or 0/);
   assert.match(
     style[0],
-    /fade_in \/ 100, fade_out \/ 100[\s\S]*?direct_quality_step, work_scale/,
+    /refine_samples, fade_in_value, fade_out \/ 100,[\s\S]*?direct_quality_step, work_scale/,
   );
 });
 
@@ -446,21 +446,14 @@ test("fade controls expose percent values while shaders receive normalized value
   assert.deepEqual(readTrack("fade_in"), [0, 100, 0]);
   assert.deepEqual(readTrack("fade_out"), [0, 100, 50]);
 
-  const directCall = source.match(
-    /obj\.pixelshader\("direct_raymarch_shadow"[\s\S]*?quality_step, work_scale,\s*([^,]+), ([^,}]+), layer_selector \}/,
-  );
-  assert.ok(directCall, "direct_raymarch_shadow call was not found");
-  const antialiasCall = source.match(
-    /obj\.pixelshader\("edge_antialias"[\s\S]*?refine_samples,\s*([^,]+), ([^,]+), effective_quality/,
-  );
-  assert.ok(antialiasCall, "edge_antialias call was not found");
-  const evaluate = (expression, fadeIn, fadeOut) => Function(
-    "fade_in", "fade_out", `return ${expression};`,
-  )(fadeIn, fadeOut);
-  assert.equal(evaluate(directCall[1], 0, 50), 0);
-  assert.equal(evaluate(directCall[2], 100, 50), 0.5);
-  assert.equal(evaluate(antialiasCall[1], 0, 50), 0);
-  assert.equal(evaluate(antialiasCall[2], 100, 50), 0.5);
+  const renderer = source.match(/local function render_direct_shadow\([\s\S]*?\r?\nend/)?.[0];
+  const style = source.match(/local function style_and_filter_shadow\([\s\S]*?\r?\nend/)?.[0];
+  assert.ok(renderer, "render_direct_shadow was not found");
+  assert.ok(style, "style_and_filter_shadow was not found");
+  assert.match(renderer, /direct_params\[#direct_params \+ 1\] = fade_in \/ 100/);
+  assert.match(renderer, /direct_params\[#direct_params \+ 1\] = fade_out \/ 100/);
+  assert.match(style, /local fade_in_value = legacy_blur and \(1 - fade_in \/ 100\) or fade_in \/ 100/);
+  assert.match(style, /refine_samples, fade_in_value, fade_out \/ 100/);
 });
 
 test("Fade In is off at zero and grows over the shadow as its value rises", () => {
@@ -492,14 +485,37 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
   assert.match(edgeShader, /fade_in > 0\.0001 \|\| fade_out > 0\.0001/);
 });
 
-test("blur shadow exposes a 4000 px range in 0.1 px steps", () => {
+test("Softness exposes a 500 px range in 0.1 px steps", () => {
   const source = readFileSync(scriptPath, "utf8");
   const match = source.match(
-    /^--track@blur_shadow:[^,]+,(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/m,
+    /^--track@blur_shadow:Softness,(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/m,
   );
-  assert.ok(match, "Blur Shadow track was not found");
+  assert.ok(match, "Softness track was not found");
 
-  assert.deepEqual(match.slice(1).map(Number), [0, 4000, 0, 0.1]);
+  assert.deepEqual(match.slice(1).map(Number), [0, 500, 0, 0.1]);
+});
+
+test("Softness sits below Directional Length and is disabled for radial shadows", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  assert.match(source,
+    /^--track@directional_length:Directional::Length[^\r\n]*\r?\n--track@blur_shadow:Softness[^\r\n]*/m);
+  assert.match(source, /^--hide@blur_shadow:shadow_type>0$/m);
+  assert.match(source, /local blur_shadow = shadow_type == 0 and math\.min\(blur_shadow, 500\) or 0/);
+});
+
+test("2D texture mapping ignores the extra Blur Shadow padding", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const styleShader = source.match(/--\[\[pixelshader@style_shadow:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(styleShader, "style_shadow shader was not found");
+  const displaySize = extractFunction(styleShader, "texture_display_size", "float2");
+  const style = extractFunction(styleShader, "style_shadow");
+
+  assert.match(displaySize, /texture_mapping_size/);
+  assert.doesNotMatch(displaySize, /buffer_size/);
+  assert.match(style, /texture_mapping_center/);
+  assert.match(source, /local texture_left, texture_top, texture_right, texture_bottom\s*=\s*compute_padding\(/);
+  assert.match(source, /texture_mapping_center_x/);
+  assert.match(source, /texture_mapping_width/);
 });
 
 test("blur sampling keeps at most 3.125 px spacing throughout the upper range", () => {
@@ -615,28 +631,25 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
   );
 });
 
-test("distance field is smoothed in both axes before either color blur pass", () => {
+test("2D texture is blurred from the spread distance before shadow compositing", () => {
   const source = readFileSync(scriptPath, "utf8");
-  const blurPipeline = source.match(/if blur_shadow > 0 then([\s\S]*?)\r?\n    end\r?\nend/);
-  assert.ok(blurPipeline, "blur pipeline was not found");
-
-  const horizontalDistance = blurPipeline[1].match(
-    /"spread_blur_distance", "cache:longshadown_blur_distance_a",\s*"cache:longshadown_resolved",\s*\{ buffer_w, buffer_h, 1, 0, blur_shadow \}/,
-  );
-  const verticalDistance = blurPipeline[1].match(
-    /"spread_blur_distance", "cache:longshadown_blur_distance_b",\s*"cache:longshadown_blur_distance_a",\s*\{ buffer_w, buffer_h, 0, 1, blur_shadow \}/,
-  );
-  assert.ok(horizontalDistance, "horizontal distance smoothing pass was not found");
-  assert.ok(verticalDistance, "vertical distance smoothing pass was not found");
-
-  const colorPasses = [...blurPipeline[1].matchAll(
-    /"blur_shadow"[\s\S]*?\{ "cache:longshadown_[^"]+", "([^"]+)" \}/g,
-  )];
-  assert.equal(colorPasses.length, 2);
-  assert.deepEqual(
-    colorPasses.map((match) => match[1]),
-    ["cache:longshadown_blur_distance_b", "cache:longshadown_blur_distance_b"],
-  );
+  const pipeline = source.match(/local function apply_integrated_blurred_2d_texture\(\)([\s\S]*?)\r?\nend/)?.[1];
+  assert.ok(pipeline, "integrated 2D texture blur was not found");
+  const passes = [
+    '"spread_blur_distance"',
+    '"cache:longshadown_blur_distance_b"',
+    '"style_2d_texture_field"',
+    '"cache:longshadown_texture_blur_a"',
+    '"cache:longshadown_texture_blur_b"',
+    '"apply_blurred_texture"',
+  ];
+  let previous = -1;
+  for (const pass of passes) {
+    const position = pipeline.indexOf(pass, previous + 1);
+    assert.ok(position > previous, `${pass} is missing or out of order`);
+    previous = position;
+  }
+  assert.match(pipeline, /\{ "cache:longshadown_final",\s*"cache:longshadown_texture_blur_b" \}/);
 });
 
 test("correlated coverage difference removes only the shared root", () => {
@@ -721,7 +734,7 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
   }
 });
 
-test("layered Direct samples retain ordered intervals and raw rear coverage", () => {
+test("layered Direct samples retain ordered intervals and raw coverage", () => {
   const source = readFileSync(scriptPath, "utf8");
   const shader = source.match(/--\[\[pixelshader@direct_raymarch_shadow:([\s\S]*?)\]\]/)?.[1];
   assert.ok(shader);
@@ -750,14 +763,14 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     LayeredSampleState continuous = (LayeredSampleState)0;
     accumulate_layered_sample(.4, 0, .49, 1, 0, continuous);
     accumulate_layered_sample(.8, 0, .51, 1, 0, continuous);
-    bool continuous_ok = abs(pack_layered_shadow(continuous,0).a-.8)<1e-5
+    bool continuous_ok = abs(pack_layered_shadow(continuous,0).a-.88)<1e-5
         && pack_layered_shadow(continuous,1).a==0;
     LayeredSampleState faded = (LayeredSampleState)0;
     accumulate_layered_sample(.55, .25, .2, .5, 0, faded);
     accumulate_layered_sample(0, .25, .5, 1, 0, faded);
     accumulate_layered_sample(.85, .25, .8, .5, 0, faded);
-    bool fade_ok = abs(pack_layered_shadow(faded,0).a-.2)<1e-5
-        && abs(pack_layered_shadow(faded,1).a-.4)<1e-5;
+    bool fade_ok = abs(pack_layered_shadow(faded,0).a-.55)<1e-5
+        && abs(pack_layered_shadow(faded,1).a-.85)<1e-5;
     LayeredSampleState opaque = (LayeredSampleState)0;
     accumulate_layered_sample(1, 0, .2, 1, 0, opaque);
     accumulate_layered_sample(0, 0, .5, 1, 0, opaque);
@@ -779,21 +792,23 @@ ${combine}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
     float4 result = combine_layer_colors(float4(.4,0,0,.4), float4(0,0,.5,.5), .5);
     float4 opaque = combine_layer_colors(float4(.3,.2,.1,1), float4(0,0,.5,.5), .5);
-    bool correct = all(abs(result-float4(.2,0,.05,.25))<1e-5)
+    bool correct = all(abs(result-float4(.2,0,.15,.35))<1e-5)
         && all(abs(opaque-float4(.15,.1,.05,.5))<1e-5);
     return correct ? float4(0,1,0,1) : float4(1,0,0,1);
 }`);
   assert.match(assembly, /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/);
 });
 
-test("Directional blur alone routes through both shadow layers", () => {
+test("Directional blur routes 2D texture through integrated blur and other styles through layers", () => {
   const source = readFileSync(scriptPath, "utf8");
   const renderBlock = source.slice(source.lastIndexOf("if should_render_shadow then"),
     source.indexOf("local object_red", source.lastIndexOf("if should_render_shadow then")));
   assert.match(renderBlock, /shadow_type == 0 and blur_shadow > 0/);
+  assert.match(renderBlock, /texture_type == 2 and has_texture ~= 0[\s\S]*?prepare_integrated_source_blur\(\)/);
+  assert.match(renderBlock, /apply_integrated_blurred_2d_texture\(\)/);
   assert.match(renderBlock, /for layer = 0, 1 do/);
   assert.match(renderBlock, /combine_shadow_layers/);
-  assert.match(renderBlock, /work_scale, -1\)/);
+  assert.match(renderBlock, /local selector = shadow_type == 0 and blur_shadow > 0 and -2 or -1/);
   assert.match(source, /"layer_front"/);
   assert.match(renderBlock, /else[\s\S]*obj\.clearbuffer\("cache:longshadown_final", obj\.w, obj\.h\)/);
 });
@@ -997,7 +1012,11 @@ test("opaque non-edge roots keep the fast path", () => {
 
 test("coverage difference does not alter quality sample spacing", () => {
   const source = readFileSync(scriptPath, "utf8");
-  assert.doesNotMatch(source, /extension_sample_alpha|minimum_travel/);
+  for (const name of ["direct_raymarch_shadow", "edge_antialias"]) {
+    const shader = source.match(new RegExp(`--\\[\\[pixelshader@${name}:([\\s\\S]*?)\\]\\]`))?.[1];
+    assert.ok(shader, `${name} shader was not found`);
+    assert.doesNotMatch(shader, /extension_sample_alpha|minimum_travel/);
+  }
 });
 
 test("Object Opacity never changes pre-filter shadow geometry", () => {
