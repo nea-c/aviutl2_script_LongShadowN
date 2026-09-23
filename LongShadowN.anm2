@@ -186,49 +186,58 @@ bool inverse_ray_interval(float2 pixel, float2 origin,
     float inset_u = (maximum_u - minimum_u) * 1e-5;
     if (any(origin + delta * minimum_u >= bounds_max)) minimum_u += inset_u;
     if (any(origin + delta * maximum_u >= bounds_max)) maximum_u -= inset_u;
-    float2 first_point = origin + delta * minimum_u;
-    float2 last_point = origin + delta * maximum_u;
+    float logarithmic_range = max(-log(safe_scale), 1e-6);
+    start_distance = saturate(log(max(minimum_u, 1)) / logarithmic_range);
+    end_distance = saturate(log(max(maximum_u, 1)) / logarithmic_range);
+
+    float2 first_point = origin + delta / pow(safe_scale, start_distance);
+    float2 last_point = origin + delta / pow(safe_scale, end_distance);
     bool first_outside = any(first_point < bounds_min)
         || any(first_point >= bounds_max);
     bool last_outside = any(last_point < bounds_min)
         || any(last_point >= bounds_max);
     if (first_outside || last_outside) {
-        // The relative inset may round away in float32; search from an interior point.
-        float midpoint_u = minimum_u + (maximum_u - minimum_u) * 0.5;
-        float2 midpoint = origin + delta * midpoint_u;
+        // Check the same distance-to-source reconstruction used by the renderer.
+        if (end_distance <= start_distance) return false;
+        float midpoint_distance = start_distance
+            + (end_distance - start_distance) * 0.5;
+        float2 midpoint = origin + delta / pow(safe_scale, midpoint_distance);
         if (any(midpoint < bounds_min) || any(midpoint >= bounds_max)) return false;
         if (first_outside) {
-            float outside_u = minimum_u;
-            float inside_u = midpoint_u;
+            float outside_distance = start_distance;
+            float inside_distance = midpoint_distance;
             [unroll]
             for (int refinement = 0; refinement < 10; ++refinement) {
-                float candidate_u = outside_u + (inside_u - outside_u) * 0.5;
-                float2 candidate = origin + delta * candidate_u;
+                float candidate_distance = outside_distance
+                    + (inside_distance - outside_distance) * 0.5;
+                float2 candidate = origin + delta
+                    / pow(safe_scale, candidate_distance);
                 if (any(candidate < bounds_min) || any(candidate >= bounds_max))
-                    outside_u = candidate_u;
-                else inside_u = candidate_u;
+                    outside_distance = candidate_distance;
+                else inside_distance = candidate_distance;
             }
-            minimum_u = inside_u;
+            start_distance = inside_distance;
         }
         if (last_outside) {
-            float inside_u = midpoint_u;
-            float outside_u = maximum_u;
+            float inside_distance = midpoint_distance;
+            float outside_distance = end_distance;
             [unroll]
             for (int refinement = 0; refinement < 10; ++refinement) {
-                float candidate_u = inside_u + (outside_u - inside_u) * 0.5;
-                float2 candidate = origin + delta * candidate_u;
+                float candidate_distance = inside_distance
+                    + (outside_distance - inside_distance) * 0.5;
+                float2 candidate = origin + delta
+                    / pow(safe_scale, candidate_distance);
                 if (any(candidate < bounds_min) || any(candidate >= bounds_max))
-                    outside_u = candidate_u;
-                else inside_u = candidate_u;
+                    outside_distance = candidate_distance;
+                else inside_distance = candidate_distance;
             }
-            maximum_u = inside_u;
+            end_distance = inside_distance;
         }
     }
 
-    float logarithmic_range = max(-log(safe_scale), 1e-6);
-    start_distance = saturate(log(max(minimum_u, 1)) / logarithmic_range);
-    end_distance = saturate(log(max(maximum_u, 1)) / logarithmic_range);
-    source_span = length(delta) * max(maximum_u - minimum_u, 0);
+    float first_u = 1 / pow(safe_scale, start_distance);
+    float last_u = 1 / pow(safe_scale, end_distance);
+    source_span = length(delta) * max(last_u - first_u, 0);
     return end_distance >= start_distance;
 }
 float4 raymarch_shadow(float4 pos : SV_Position) : SV_Target {

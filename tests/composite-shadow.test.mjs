@@ -218,6 +218,31 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
   );
 });
 
+test("inverse ray interval endpoints survive distance reconstruction", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const intervalFunction = extractFunction(source, "inverse_ray_interval", "bool");
+  const assembly = compileConstantResult(`
+${intervalFunction}
+
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float start_distance, end_distance, source_span;
+    float2 origin = float2(-2.645735740661621, -3.4199843406677246);
+    float2 pixel = float2(0.4259900748729706, 0.9993191957473755);
+    bool hit = inverse_ray_interval(pixel, origin, float2(0, 0),
+        float2(1, 1), 0.25, start_distance, end_distance, source_span);
+    float2 first = origin + (pixel - origin) / pow(0.25, start_distance);
+    float2 last = origin + (pixel - origin) / pow(0.25, end_distance);
+    bool correct = hit && all(first >= 0) && all(first < 1)
+        && all(last >= 0) && all(last < 1);
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+  assert.match(
+    assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+  );
+});
+
 test("inverse ray interval reaches the convergence endpoint", () => {
   const source = readFileSync(scriptPath, "utf8");
   const intervalFunction = extractFunction(source, "inverse_ray_interval", "bool");
