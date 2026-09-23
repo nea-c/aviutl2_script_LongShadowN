@@ -1,10 +1,10 @@
-# Continuous Object and Shadow Compositing Implementation Plan
+# Root and Extension Coverage Compositing Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace binary object-edge backing with continuous premultiplied compositing so source AA, Object Opacity zero, and extended shadows coexist without fringes.
+**Goal:** Remove the colored distance-zero outline at Object Opacity zero while retaining antialiased positive-distance shadow extension, including inside glyph holes.
 
-**Architecture:** The final compositor will use the original source alpha as a continuous overlap mask. A single helper will reject distance-zero coverage outside the source, attenuate shadow under the source according to Object Opacity, and leave positive-distance extension intact; the styled source is then composited with normal premultiplied source-over.
+**Architecture:** Resolve total Direct coverage and reconstructed positive-distance extension coverage into separate channels of the existing metadata texture. Select between extension and total coverage before styling and blur according to Object Opacity, then apply the original source alpha only as a continuous final overlap cutout.
 
 **Tech Stack:** AviUtl2 `.anm2` Lua script, embedded HLSL pixel shaders, Node.js `node:test`, Microsoft FXC Shader Model 5 compiler.
 
@@ -12,265 +12,382 @@
 
 ## Global Constraints
 
-- Do not add a render pass, texture buffer, user-facing parameter, or saved-project value.
-- Keep Directional, Radial, and Inverse Radial renderer routing unchanged.
-- Keep Fade, texture, Blur Shadow, Post Smooth, supersampling, and padding behavior unchanged.
-- Use premultiplied RGBA throughout the compositor.
-- Object Opacity zero removes fully covered overlap, antialiases partial overlap, and preserves positive-distance extension.
-- Remove the one-byte `saturate(source.a * 255)` backing mask and do not replace it with another binary source-alpha threshold.
+- Do not add a render pass, cache buffer, user-facing parameter, or saved-project value.
+- Keep Directional, Radial, and Inverse Radial renderer and quality routing unchanged.
+- Keep Direct raw source-coordinate packing consumed by `resolve_source_color` unchanged.
+- Reconstruct 2x supersampling extension coverage per raw work sample before averaging.
+- Store faded positive-distance extension coverage in resolved `.r` and faded total coverage in resolved `.a`.
+- Select extension-versus-total coverage before Post Smooth and Blur Shadow.
+- Keep premultiplied RGBA through styling and final source-over.
+- Remove final first-hit-distance rejection; an explicit extension channel replaces it.
 
 ## Review Focus
 
-- Source alpha below `1/255`: it remains proportional instead of becoming full support; Task 1 Step 1 includes `1/1024` coverage.
-- Intermediate Object Opacity: both source and overlapping shadow change continuously; Task 1 Step 1 includes opacity `0.5`.
-- Partially transparent shadow: premultiplied RGB and alpha remain bounded and proportional; Task 1 Step 1 includes shadow alpha `0.5`.
-- Near-root positive distance: `1e-5` extension is retained while exact distance zero outside the source is removed; Task 1 Step 1 includes both values.
-- Object Mix at a partial source edge: only the source contribution is recolored and the background shadow remains visible; Task 1 Step 1 includes a red source over a blue shadow.
+- A root-only antialiased pixel must reconstruct zero extension instead of producing an exterior colored outline; Task 1 Step 1 includes `T = R = 0.4375`.
+- A zero-first-hit pixel with later ray coverage must retain extension; Task 1 Step 1 includes `R = 0.4375`, `E = 0.8`, and `T = 0.8875`.
+- 2x supersampling must reconstruct each of four nonlinear samples before averaging; Task 1 Step 1 checks operation ordering inside `resolve_shadow`.
+- Object Opacity 0, 50, and 100 must select extension, midpoint, and total coverage before blur; Task 2 Step 1 compiles all three endpoints.
+- Fractional source alpha and partially transparent shadow must remain proportional after the final overlap cutout; Task 2 Step 1 compiles full composition at opacity 0 and 0.5.
 
 ---
 
-### Task 1: Continuous final compositing
+### Task 1: Resolve positive-distance extension coverage
 
 **Files:**
-- Modify: `LongShadowN.anm2:823-870` — final HLSL compositor helpers and entry point.
-- Modify: `tests/composite-shadow.test.mjs:613-735` — constant-folded HLSL behavior tests.
+- Modify: `LongShadowN.anm2:255-510` — edge refinement contract.
+- Modify: `LongShadowN.anm2:667-700` — resolved metadata reconstruction.
+- Modify: `LongShadowN.anm2:1103-1114` — resolve shader inputs and constants.
+- Modify: `tests/composite-shadow.test.mjs:48-612` — reconstruction and protocol tests.
 
 **Interfaces:**
-- Consumes: `float4 shadow`, original premultiplied `float4 source`, resolved packed `float4 shadow_info`, and global normalized `float object_opacity`.
-- Produces: `float4 prepare_shadow_for_object(float4 shadow, float4 source, float4 shadow_info)`, returning premultiplied shadow ready for standard source-over.
-- Retains: `float4 color_object(float4 source)` and `float4 composite_shadow(float4 pos : SV_Position)`.
-- Removes: `float4 neutralize_shadow(float4 shadow, float4 source)` and its binary one-byte support behavior.
+- Consumes: raw Direct `float4` where `.a` is total union coverage, the original source texture, `source_offset`, `source_size`, and `work_scale`.
+- Produces: `float reconstruct_extension_coverage(float total_coverage, float root_coverage)` and resolved metadata `{ extension * fade, distance * total * fade, geometry, total * fade }`.
+- Preserves: raw `.rb` source-coordinate encoding before resolve and the existing resolved `.g`, `.b`, and `.a` meanings.
 
-- [ ] **Step 1: Replace the old backing expectations with failing continuous-compositing tests**
+- [ ] **Step 1: Add failing extension-reconstruction and resolved-contract tests**
 
-In `tests/composite-shadow.test.mjs`, keep the existing `extractFunction` and
-`compileConstantResult` helpers. Replace the tests beginning with
-`zero-distance Direct coverage is hidden outside the source` through
-`object mix is not diluted by the original-colored shadow` with tests that
-extract `prepare_shadow_for_object` and `color_object` and compile literal
-cases.
-
-The first test pins root rejection without deleting real extension:
+Add this constant-folded HLSL test to `tests/composite-shadow.test.mjs`:
 
 ```js
-test("only exact unextended coverage is hidden outside the source", () => {
+test("extension coverage separates root from ray accumulation", () => {
   const source = readFileSync(scriptPath, "utf8");
-  const prepareShadow = extractFunction(source, "prepare_shadow_for_object");
+  const reconstruct = extractFunction(source, "reconstruct_extension_coverage");
   const assembly = compileConstantResult(`
-static const float object_opacity = 1;
-${prepareShadow}
-
+${reconstruct}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float4 shadow = float4(0, 0, 0.5, 0.5);
-    float4 transparent_source = 0;
-    float4 root_info = float4(0.25, 0, 1, 0.5);
-    float4 near_info = float4(0.25, 0.000005, 1, 0.5);
-    float4 removed = prepare_shadow_for_object(
-        shadow, transparent_source, root_info);
-    float4 retained = prepare_shadow_for_object(
-        shadow, transparent_source, near_info);
-    bool correct = all(abs(removed) < 1e-6)
-        && all(abs(retained - shadow) < 1e-6);
+    float root = 0.4375;
+    float expected_extension = 0.8;
+    float combined = root + (1 - root) * expected_extension;
+    bool correct = abs(reconstruct_extension_coverage(root, root)) < 1e-6
+        && abs(reconstruct_extension_coverage(combined, root)
+            - expected_extension) < 1e-6
+        && abs(reconstruct_extension_coverage(0.6, 0) - 0.6) < 1e-6
+        && abs(reconstruct_extension_coverage(1, 1)) < 1e-6;
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
   assert.match(assembly,
     /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-    "root rejection removed positive-distance extension or retained distance zero");
+    "root-only coverage or positive-distance extension was reconstructed incorrectly");
 });
 ```
 
-`near_info.g / near_info.a` is `1e-5`, deliberately above the exact-root
-threshold.
-
-The second test pins normal source-over at full Object Opacity:
+Add a structural test that pins per-work-sample reconstruction and the Lua
+input contract:
 
 ```js
-test("shadow overlap preserves continuous source antialiasing", () => {
+test("resolved extension is reconstructed before 2x averaging", () => {
   const source = readFileSync(scriptPath, "utf8");
-  const colorObject = extractFunction(source, "color_object");
-  const prepareShadow = extractFunction(source, "prepare_shadow_for_object");
-  const assembly = compileConstantResult(`
-static const float3 object_rgb = float3(1, 0, 0);
-static const float object_mix = 0;
-static const float object_opacity = 1;
-${colorObject}
-${prepareShadow}
+  const shader = source.match(
+    /--\[\[pixelshader@resolve_shadow:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(shader, "resolve_shadow shader was not found");
+  const sampleReconstruction = shader.indexOf(
+    "reconstruct_extension_coverage(sample_info.a, root_alpha)");
+  const averaging = shader.indexOf("shadow_info /= 4");
+  assert.ok(sampleReconstruction >= 0 && averaging > sampleReconstruction,
+    "2x resolve averaged nonlinear coverage before reconstruction");
+  assert.match(shader, /Texture2D source_texture\s*:\s*register\(t1\)/);
+  assert.match(source,
+    /obj\.pixelshader\("resolve_shadow"[\s\S]*?\{\s*"cache:longshadown_shadow_a",\s*"cache:longshadown_source"\s*\}/);
+});
+```
 
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float4 original = float4(0.5, 0.5, 0.5, 0.5);
-    float4 blue_shadow = float4(0, 0, 1, 1);
-    float4 info = float4(0.25, 0.25, 1, 1);
-    float4 shadow = prepare_shadow_for_object(blue_shadow, original, info);
-    float4 styled = color_object(original);
-    float4 result = styled + shadow * (1 - styled.a);
-    float4 no_shadow = prepare_shadow_for_object(
-        float4(0, 0, 0, 0), original, float4(0, 0, 0, 0));
-    float4 transparent_result = styled + no_shadow * (1 - styled.a);
-    bool correct = all(abs(result - float4(0.5, 0.5, 1, 1)) < 1e-6)
-        && all(abs(transparent_result - original) < 1e-6);
-    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+Add a protocol test for refined edges:
+
+```js
+test("edge refinement emits extension coverage in resolved red", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@edge_antialias:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(shader, "edge_antialias shader was not found");
+  assert.match(shader,
+    /float extension_coverage\s*=\s*reconstruct_extension_coverage\(coverage,\s*root_alpha\)/);
+  assert.match(shader,
+    /float4 contribution\s*=\s*float4\(extension_coverage \* weight,/);
+});
+```
+
+- [ ] **Step 2: Run Task 1 tests and verify RED**
+
+Run:
+
+```powershell
+node --test --test-name-pattern="extension coverage separates|resolved extension is reconstructed|edge refinement emits" tests/composite-shadow.test.mjs
+```
+
+Expected: FAIL because `reconstruct_extension_coverage was not found` and the
+resolve shader still accepts only the raw shadow texture.
+
+- [ ] **Step 3: Add shared reconstruction math and root sampling to both shaders**
+
+Add this helper inside both `edge_antialias` and `resolve_shadow` shader blocks:
+
+```hlsl
+float reconstruct_extension_coverage(float total_coverage,
+    float root_coverage) {
+    float uncovered_root = 1 - saturate(root_coverage);
+    if (uncovered_root <= 1e-6) return 0;
+    return saturate((total_coverage - root_coverage) / uncovered_root);
 }
-`);
-  assert.match(assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-    "source edge was normalized to an opaque object-colored backing");
-});
 ```
 
-Add this table-style constant shader test for Object Opacity endpoints,
-intermediate opacity, tiny source alpha, and partial shadow alpha:
+In `resolve_shadow`, add the original source as `t1`, a linear sampler, source
+bounds in the constant buffer, and exact Direct-coordinate root sampling:
+
+```hlsl
+Texture2D source_texture : register(t1);
+SamplerState linear_sampler : register(s0);
+float sample_root_alpha(float2 pixel) {
+    float2 local = pixel - source_offset;
+    if (any(local < 0) || any(local >= source_size)) return 0;
+    return saturate(source_texture.SampleLevel(
+        linear_sampler, local / source_size, 0).a);
+}
+```
+
+Extend the `resolve_shadow` constant buffer with `float2 source_offset` and
+`float2 source_size` after `work_scale`.
+
+- [ ] **Step 4: Reconstruct each raw work sample before averaging**
+
+Replace the resolve accumulation with explicit per-sample extension
+reconstruction. In the 2x branch, use the raw work-pixel center that the Direct
+shader used:
+
+```hlsl
+float extension_coverage = 0;
+if (work_scale >= 1.5) {
+    int2 base = int2(pos.xy) * 2;
+    shadow_info = 0;
+    [unroll]
+    for (int y = 0; y < 2; ++y) {
+        [unroll]
+        for (int x = 0; x < 2; ++x) {
+            int2 work_position = base + int2(x, y);
+            float4 sample_info = shadow_texture[work_position];
+            float2 pixel = (float2(work_position) + 0.5) / work_scale;
+            float root_alpha = sample_root_alpha(pixel);
+            extension_coverage += reconstruct_extension_coverage(
+                sample_info.a, root_alpha);
+            shadow_info += sample_info;
+        }
+    }
+    shadow_info /= 4;
+    extension_coverage /= 4;
+} else {
+    shadow_info = shadow_texture[int2(pos.xy)];
+    float root_alpha = sample_root_alpha(pos.xy / work_scale);
+    extension_coverage = reconstruct_extension_coverage(
+        shadow_info.a, root_alpha);
+}
+```
+
+Keep the existing distance, fade, and geometry calculations, but return:
+
+```hlsl
+return float4(extension_coverage * weight, shadow_info.g * weight,
+    geometry, shadow_info.a * weight);
+```
+
+Update the Lua resolve call to pass both textures and the new constants:
+
+```lua
+obj.pixelshader("resolve_shadow", "cache:longshadown_resolved",
+    { "cache:longshadown_shadow_a", "cache:longshadown_source" },
+    { buffer_w, buffer_h, fade_in / 100, fade_out / 100, work_scale,
+      source_offset_x, source_offset_y, source_w, source_h }, "copy", "clamp")
+```
+
+- [ ] **Step 5: Make edge refinement emit the same resolved contract**
+
+Immediately before the refined ray loop, sample the subpixel root:
+
+```hlsl
+float root_alpha = sample_source_alpha(pixel);
+```
+
+After the loop computes total `coverage`, reconstruct extension and use it in
+the red contribution channel:
+
+```hlsl
+float extension_coverage = reconstruct_extension_coverage(
+    coverage, root_alpha);
+float weight = fade_weight_aa(first_distance);
+float weighted_coverage = coverage * weight;
+float4 contribution = float4(extension_coverage * weight,
+    first_distance * weighted_coverage,
+    found_source ? 1 : 0, weighted_coverage);
+```
+
+- [ ] **Step 6: Run Task 1 tests and shader compilation**
+
+Run:
+
+```powershell
+node --test --test-name-pattern="extension coverage separates|resolved extension is reconstructed|edge refinement emits|all embedded pixel shaders compile" tests/composite-shadow.test.mjs
+```
+
+Expected: all selected tests PASS and FXC compiles every embedded shader.
+
+- [ ] **Step 7: Commit Task 1**
+
+```powershell
+git add -- LongShadowN.anm2 tests/composite-shadow.test.mjs
+git commit -m "Track positive-distance shadow coverage"
+```
+
+---
+
+### Task 2: Select extension coverage before styling
+
+**Files:**
+- Modify: `LongShadowN.anm2:566-665` — shadow coverage selection.
+- Modify: `LongShadowN.anm2:823-864` — final overlap compositor.
+- Modify: `LongShadowN.anm2:1118-1150` — style shader constants.
+- Modify: `LongShadowN.anm2:1198-1206` — final compositor inputs.
+- Modify: `tests/composite-shadow.test.mjs:613-750` — opacity, outline, and wiring tests.
+
+**Interfaces:**
+- Consumes: resolved `.r` extension coverage, resolved `.a` total coverage, normalized `object_opacity`, styled premultiplied shadow, and original premultiplied source.
+- Produces: `float select_shadow_coverage(float4 shadow_info)` and `float4 prepare_shadow_for_object(float4 shadow, float4 source)`.
+- Removes: final dependence on first-hit distance and the resolved metadata texture from `composite_shadow`.
+
+- [ ] **Step 1: Add failing coverage-selection and full-composition tests**
+
+Add this constant-folded selection test:
 
 ```js
-test("Object Opacity attenuates overlap with continuous source coverage", () => {
+test("Object Opacity selects extension before shadow styling", () => {
   const source = readFileSync(scriptPath, "utf8");
-  const prepareShadow = extractFunction(source, "prepare_shadow_for_object");
-  const cases = [
-    {
-      name: "zero opacity and full source",
-      opacity: "0",
-      sourceValue: "float4(1, 1, 1, 1)",
-      expected: "float4(0, 0, 0, 0)",
-    },
-    {
-      name: "zero opacity and half source",
-      opacity: "0",
-      sourceValue: "float4(0.5, 0.5, 0.5, 0.5)",
-      expected: "float4(0, 0, 0.25, 0.25)",
-    },
-    {
-      name: "half opacity and half source",
-      opacity: "0.5",
-      sourceValue: "float4(0.5, 0.5, 0.5, 0.5)",
-      expected: "float4(0, 0, 0.375, 0.375)",
-    },
-    {
-      name: "full opacity and sub-byte source",
-      opacity: "1",
-      sourceValue: "float4(1.0 / 1024, 1.0 / 1024, 1.0 / 1024, 1.0 / 1024)",
-      expected: "float4(0, 0, 0.5, 0.5)",
-    },
-  ];
-  for (const testCase of cases) {
+  const selectCoverage = extractFunction(source, "select_shadow_coverage");
+  const cases = [["0", "0.4"], ["0.5", "0.6"], ["1", "0.8"]];
+  for (const [opacity, expected] of cases) {
     const assembly = compileConstantResult(`
-static const float object_opacity = ${testCase.opacity};
-${prepareShadow}
-
+static const float object_opacity = ${opacity};
+${selectCoverage}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float4 shadow = float4(0, 0, 0.5, 0.5);
-    float4 source_sample = ${testCase.sourceValue};
-    float4 info = float4(0.25, 0.125, 1, 0.5);
-    float4 result = prepare_shadow_for_object(shadow, source_sample, info);
-    bool correct = all(abs(result - ${testCase.expected}) < 1e-6);
+    float result = select_shadow_coverage(float4(0.4, 0.2, 1, 0.8));
+    bool correct = abs(result - ${expected}) < 1e-6;
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
     assert.match(assembly,
       /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-      testCase.name);
+      `Object Opacity ${opacity}`);
   }
 });
 ```
 
-Finally, replace the old Object Mix full-red expectation with the physically
-correct partial-edge result using this complete test:
+Replace the old exact-distance rejection test with a structural/wiring test:
 
 ```js
-test("Object Mix recolors only the antialiased source contribution", () => {
+test("final compositing no longer guesses extension from first-hit distance", () => {
   const source = readFileSync(scriptPath, "utf8");
-  const colorObject = extractFunction(source, "color_object");
   const prepareShadow = extractFunction(source, "prepare_shadow_for_object");
-  const assembly = compileConstantResult(`
-static const float3 object_rgb = float3(1, 0, 0);
-static const float object_mix = 1;
-static const float object_opacity = 1;
-${colorObject}
-${prepareShadow}
-
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float4 original = float4(0.5, 0.5, 0.5, 0.5);
-    float4 blue_shadow = float4(0, 0, 1, 1);
-    float4 info = float4(0.25, 0.25, 1, 1);
-    float4 prepared = prepare_shadow_for_object(blue_shadow, original, info);
-    float4 styled = color_object(original);
-    float4 result = styled + prepared * (1 - styled.a);
-    bool correct = all(abs(result - float4(0.5, 0, 0.5, 1)) < 1e-6);
-    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-}
-`);
-  assert.match(assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-    "Object Mix normalized a partial edge or recolored the background shadow");
+  assert.doesNotMatch(prepareShadow, /shadow_info|distance/);
+  const composite = extractFunction(source, "composite_shadow");
+  assert.doesNotMatch(composite, /shadow_info_texture/);
+  assert.match(source,
+    /obj\.pixelshader\("composite_shadow",\s*"object",\s*\{\s*"cache:longshadown_final",\s*"cache:longshadown_source"\s*\}/);
 });
 ```
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+Add a complete source-over test at opacity 0 and 0.5:
+
+```js
+test("full composition keeps fractional overlap premultiplied", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const colorObject = extractFunction(source, "color_object");
+  const prepareShadow = extractFunction(source, "prepare_shadow_for_object");
+  const cases = [
+    ["0", "float4(0, 0, 0.25, 0.25)"],
+    ["0.5", "float4(0.25, 0.25, 0.53125, 0.53125)"],
+  ];
+  for (const [opacity, expected] of cases) {
+    const assembly = compileConstantResult(`
+static const float3 object_rgb = float3(1, 1, 1);
+static const float object_mix = 0;
+static const float object_opacity = ${opacity};
+${colorObject}
+${prepareShadow}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float4 original = float4(0.5, 0.5, 0.5, 0.5);
+    float4 shadow = prepare_shadow_for_object(
+        float4(0, 0, 0.5, 0.5), original);
+    float4 styled = color_object(original);
+    float4 result = styled + shadow * (1 - styled.a);
+    bool correct = all(abs(result - ${expected}) < 1e-6);
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+    assert.match(assembly,
+      /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+      `full composition opacity ${opacity}`);
+  }
+});
+```
+
+- [ ] **Step 2: Run Task 2 tests and verify RED**
 
 Run:
 
 ```powershell
-node --test --test-name-pattern="unextended coverage|continuous source antialiasing|Object Opacity attenuates|Object Mix" tests/composite-shadow.test.mjs
+node --test --test-name-pattern="selects extension before|no longer guesses extension|full composition keeps" tests/composite-shadow.test.mjs
 ```
 
-Expected: FAIL because `prepare_shadow_for_object was not found`, or because
-the current binary backing produces the old opaque values. A syntax error or an
-FXC invocation error is not the expected RED; fix the test and rerun until the
-failure names the missing continuous behavior.
+Expected: FAIL because `select_shadow_coverage was not found`, the compositor
+still accepts `shadow_info`, and the full composition helper signature differs.
 
-- [ ] **Step 3: Implement the continuous shadow-preparation helper**
+- [ ] **Step 3: Select coverage in `style_shadow` before post-processing**
 
-In the embedded `composite_shadow` shader in `LongShadowN.anm2`, replace
-`remove_unextended_shadow` and `neutralize_shadow` with:
+Add normalized Object Opacity to the end of the `style_shadow` constant buffer
+and add:
 
 ```hlsl
-float4 prepare_shadow_for_object(float4 shadow, float4 source,
-    float4 shadow_info) {
-    if (shadow_info.a > 1e-6 && source.a <= 1e-6) {
-        float distance = saturate(shadow_info.g / shadow_info.a);
-        if (distance <= 1e-6) return 0;
-    }
+float select_shadow_coverage(float4 shadow_info) {
+    return lerp(shadow_info.r, shadow_info.a, object_opacity);
+}
+```
+
+Change the styled alpha calculation to:
+
+```hlsl
+float solid_alpha = select_shadow_coverage(shadow_info) * shadow_opacity;
+```
+
+Append `object_opacity / 100` to the constants passed by both the repeating and
+clamped `style_shadow` Lua calls. Do not change their texture inputs.
+
+- [ ] **Step 4: Remove first-hit guessing from the final compositor**
+
+Remove `shadow_info_texture : register(t2)`, the local `shadow_info` read, and
+the third helper parameter. Keep only continuous overlap attenuation:
+
+```hlsl
+float4 prepare_shadow_for_object(float4 shadow, float4 source) {
     float overlap_weight = 1 - source.a * (1 - object_opacity);
     return shadow * overlap_weight;
 }
 ```
 
-Do not use `saturate(source.a * 255)`, nearest-neighbor dilation, or an
-object-colored backing.
+Call the helper with `shadow` and `source_sample`, retain `color_object` and
+premultiplied source-over, and change the Lua compositor input list to exactly:
 
-- [ ] **Step 4: Wire standard premultiplied source-over**
-
-Update `composite_shadow` to prepare the shadow once, style the source once, and
-perform normal source-over:
-
-```hlsl
-float4 composite_shadow(float4 pos : SV_Position) : SV_Target {
-    float4 shadow = shadow_texture[int2(pos.xy)];
-    float4 shadow_info = shadow_info_texture[int2(pos.xy)];
-    int2 source_pos = int2(floor(pos.xy - source_offset));
-    float4 source_sample = 0;
-    if (all(source_pos >= 0) && all(source_pos < int2(source_size))) {
-        source_sample = source_texture[source_pos];
-    }
-    shadow = prepare_shadow_for_object(shadow, source_sample, shadow_info);
-    float4 source = color_object(source_sample);
-    return source + shadow * (1 - source.a);
-}
+```lua
+{ "cache:longshadown_final", "cache:longshadown_source" }
 ```
 
-Keep the existing third input texture,
-`cache:longshadown_resolved`, in the Lua `obj.pixelshader` call.
-
-- [ ] **Step 5: Run the focused tests and verify GREEN**
+- [ ] **Step 5: Run Task 2 focused tests and shader compilation**
 
 Run:
 
 ```powershell
-node --test --test-name-pattern="unextended coverage|continuous source antialiasing|Object Opacity attenuates|Object Mix|all embedded pixel shaders compile" tests/composite-shadow.test.mjs
+node --test --test-name-pattern="selects extension before|no longer guesses extension|full composition keeps|continuous source antialiasing|Object Opacity attenuates|Object Mix|all embedded pixel shaders compile" tests/composite-shadow.test.mjs
 ```
 
-Expected: all selected tests PASS and every embedded HLSL shader compiles.
+Expected: all selected tests PASS and every embedded shader compiles.
 
-- [ ] **Step 6: Run the full automated regression suite**
+- [ ] **Step 6: Run full automated verification**
 
 Run:
 
@@ -279,45 +396,46 @@ node --test tests/*.test.mjs
 git diff --check
 ```
 
-Expected: all tests PASS, HLSL compilation succeeds, and `git diff --check`
-returns no errors. The existing FXC `X3577` warning about `isfinite()` is
-known and does not indicate failure.
+Expected: all tests PASS; FXC may emit the existing `X3577` `isfinite` warning;
+`git diff --check` reports no errors.
 
-- [ ] **Step 7: Inspect the final diff against the spec**
+- [ ] **Step 7: Inspect protocol and scope**
 
 Run:
 
 ```powershell
+rg -n "reconstruct_extension_coverage|select_shadow_coverage|shadow_info_texture|first_distance|overlap_weight|resolve_shadow|style_shadow" LongShadowN.anm2 tests/composite-shadow.test.mjs
 git diff -- LongShadowN.anm2 tests/composite-shadow.test.mjs
-rg -n "source\.a \* 255|neutralize_shadow|prepare_shadow_for_object|overlap_weight" LongShadowN.anm2 tests/composite-shadow.test.mjs
 ```
 
 Expected:
 
-- no `source.a * 255` or `neutralize_shadow` remains;
-- one `prepare_shadow_for_object` definition and one compositor call remain;
-- `overlap_weight` uses continuous source alpha and Object Opacity;
-- no renderer, blur, fade, texture, or parameter definitions changed.
+- resolve and edge refinement both write extension coverage to `.r`;
+- style selects `.r`/`.a` before smoothing and blur;
+- final compositing has no resolved texture or distance-zero rejection;
+- Direct raw packing, renderer routing, user parameters, and cache-buffer count
+  are unchanged.
 
-- [ ] **Step 8: Commit the implementation**
+- [ ] **Step 8: Commit Task 2**
 
 ```powershell
 git add -- LongShadowN.anm2 tests/composite-shadow.test.mjs
-git commit -m "Use continuous object shadow compositing"
+git commit -m "Remove distance-zero shadow outlines"
 ```
 
 - [ ] **Step 9: Perform manual AviUtl verification before integration**
 
-Use a white antialiased glyph over a saturated shadow and check Object Opacity
-at `100`, `50`, and `0` for Directional, Radial, and Inverse Radial. Inspect the
-shadow-facing outer edge, the opposite edge, and glyph holes at 400% or higher
-preview zoom.
+Use the reported saturated rainbow shadow and white antialiased text. Check
+Object Opacity `0`, `50`, and `100` for Directional, Radial, and Inverse Radial
+with Supersampling `None` and `2x`. Repeat with Blur Shadow `0` and one visible
+nonzero value.
 
 Acceptance criteria:
 
-- no white/object-colored binary fringe where source and shadow overlap;
-- no black gap on the shadow-facing edge;
-- no colored distance-zero outline on the non-extending edge;
-- Object Opacity `0` removes the fully covered overlap and leaves an
-  antialiased transition into the positive-distance shadow;
-- extended shadow remains visible and no quality tier routing changes.
+- no thin shadow-colored copy around curved or straight source edges at
+  Object Opacity zero;
+- no root gap at Object Opacity 50 or 100;
+- glyph holes retain genuine positive-distance extension;
+- partial edges remain antialiased rather than binary;
+- quality-tier routing and performance remain unchanged apart from the small
+  resolve-time source sample.
