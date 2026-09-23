@@ -607,10 +607,9 @@ cbuffer constant0 : register(b0) {
     float shadow_mix;
     float shadow_type;
     float target_scale;
-    float object_opacity;
 };
 float select_shadow_coverage(float4 shadow_info) {
-    return lerp(shadow_info.r, shadow_info.a, object_opacity);
+    return shadow_info.r;
 }
 float3 mix_shadow_color(float4 source) {
     float3 source_rgb = source.a > 1e-6
@@ -1188,8 +1187,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
               texture_type == 2 and texture_2d_scale_y or 100,
               texture_mapping, texture_w, texture_h, has_texture,
               texture_color_mix / 100, texture_alpha_mix / 100,
-              shadow_mix / 100, shadow_type, target_scale,
-              object_opacity / 100 }, "copy", "loop")
+              shadow_mix / 100, shadow_type, target_scale }, "copy", "loop")
     else
         obj.pixelshader("style_shadow", "cache:longshadown_final",
             { "cache:longshadown_resolved", "cache:longshadown_texture", "cache:longshadown_source_color" },
@@ -1199,8 +1197,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
               texture_type == 2 and texture_2d_scale_y or 100,
               texture_mapping, texture_w, texture_h, has_texture,
               texture_color_mix / 100, texture_alpha_mix / 100,
-              shadow_mix / 100, shadow_type, target_scale,
-              object_opacity / 100 }, "copy", "clamp")
+              shadow_mix / 100, shadow_type, target_scale }, "copy", "clamp")
     end
     if post_smooth then
         obj.clearbuffer("cache:longshadown_filtered", buffer_w, buffer_h)

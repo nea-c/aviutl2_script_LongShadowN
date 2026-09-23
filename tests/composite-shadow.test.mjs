@@ -699,18 +699,17 @@ test("coverage difference does not alter quality sample spacing", () => {
   assert.doesNotMatch(source, /extension_sample_alpha|minimum_travel/);
 });
 
-test("Object Opacity selects extension before shadow styling", () => {
+test("Object Opacity never changes pre-filter shadow geometry", () => {
   const source = readFileSync(scriptPath, "utf8");
   const selectCoverage = extractFunction(
     source, "select_shadow_coverage", "float");
-  const cases = [["0", "0.4"], ["0.5", "0.6"], ["1", "0.8"]];
-  for (const [opacity, expected] of cases) {
+  for (const opacity of ["0", "0.5", "1"]) {
     const assembly = compileConstantResult(`
 static const float object_opacity = ${opacity};
 ${selectCoverage}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float result = select_shadow_coverage(float4(0.4, 0.2, 1, 0.8));
-    bool correct = abs(result - ${expected}) < 1e-6;
+    float result = select_shadow_coverage(float4(0.3, 0.2, 1, 0.9));
+    bool correct = abs(result - 0.3) < 1e-6;
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
@@ -720,18 +719,17 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
   }
 });
 
-test("style shadow receives normalized Object Opacity before filtering", () => {
+test("style shadow has no Object Opacity input", () => {
   const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@style_shadow:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(shader, "style_shadow shader was not found");
+  assert.doesNotMatch(shader, /float object_opacity/);
   const calls = [...source.matchAll(
-    /obj\.pixelshader\("style_shadow"[\s\S]*?shadow_mix \/ 100, shadow_type, target_scale,\s*([^}]+)\}, "copy", "(?:loop|clamp)"\)/g,
+    /obj\.pixelshader\("style_shadow"[\s\S]*?shadow_mix \/ 100, shadow_type, target_scale([^}]*)\}, "copy", "(?:loop|clamp)"\)/g,
   )];
   assert.equal(calls.length, 2);
-  for (const call of calls) {
-    const normalized = Function(
-      "object_opacity", `return ${call[1]};`,
-    )(50);
-    assert.equal(normalized, 0.5);
-  }
+  for (const call of calls) assert.doesNotMatch(call[1], /object_opacity/);
 });
 
 test("final compositing no longer guesses extension from first-hit distance", () => {
