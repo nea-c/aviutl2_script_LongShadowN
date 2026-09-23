@@ -659,30 +659,80 @@ test("edge refinement emits extension coverage in resolved red", () => {
     /float4 contribution\s*=\s*float4\(extension_coverage \* weight,/);
 });
 
-test("only exact unextended coverage is hidden outside the source", () => {
+test("Object Opacity selects extension before shadow styling", () => {
   const source = readFileSync(scriptPath, "utf8");
-  const prepareShadow = extractFunction(source, "prepare_shadow_for_object");
-  const assembly = compileConstantResult(`
-static const float object_opacity = 1;
-${prepareShadow}
-
+  const selectCoverage = extractFunction(
+    source, "select_shadow_coverage", "float");
+  const cases = [["0", "0.4"], ["0.5", "0.6"], ["1", "0.8"]];
+  for (const [opacity, expected] of cases) {
+    const assembly = compileConstantResult(`
+static const float object_opacity = ${opacity};
+${selectCoverage}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float4 shadow = float4(0, 0, 0.5, 0.5);
-    float4 transparent_source = 0;
-    float4 root_info = float4(0.25, 0, 1, 0.5);
-    float4 near_info = float4(0.25, 0.000005, 1, 0.5);
-    float4 removed = prepare_shadow_for_object(
-        shadow, transparent_source, root_info);
-    float4 retained = prepare_shadow_for_object(
-        shadow, transparent_source, near_info);
-    bool correct = all(abs(removed) < 1e-6)
-        && all(abs(retained - shadow) < 1e-6);
+    float result = select_shadow_coverage(float4(0.4, 0.2, 1, 0.8));
+    bool correct = abs(result - ${expected}) < 1e-6;
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
-  assert.match(assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-    "root rejection removed positive-distance extension or retained distance zero");
+    assert.match(assembly,
+      /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+      `Object Opacity ${opacity}`);
+  }
+});
+
+test("style shadow receives normalized Object Opacity before filtering", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const calls = [...source.matchAll(
+    /obj\.pixelshader\("style_shadow"[\s\S]*?shadow_mix \/ 100, shadow_type, target_scale,\s*([^}]+)\}, "copy", "(?:loop|clamp)"\)/g,
+  )];
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    const normalized = Function(
+      "object_opacity", `return ${call[1]};`,
+    )(50);
+    assert.equal(normalized, 0.5);
+  }
+});
+
+test("final compositing no longer guesses extension from first-hit distance", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const prepareShadow = extractFunction(source, "prepare_shadow_for_object");
+  assert.doesNotMatch(prepareShadow, /shadow_info|distance/);
+  const composite = extractFunction(source, "composite_shadow");
+  assert.doesNotMatch(composite, /shadow_info_texture/);
+  assert.match(source,
+    /obj\.pixelshader\("composite_shadow",\s*"object",\s*\{\s*"cache:longshadown_final",\s*"cache:longshadown_source"\s*\}/);
+});
+
+test("full composition keeps fractional overlap premultiplied", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const colorObject = extractFunction(source, "color_object");
+  const prepareShadow = extractFunction(source, "prepare_shadow_for_object");
+  const cases = [
+    ["0", "float4(0, 0, 0.25, 0.25)"],
+    ["0.5", "float4(0.25, 0.25, 0.53125, 0.53125)"],
+  ];
+  for (const [opacity, expected] of cases) {
+    const assembly = compileConstantResult(`
+static const float3 object_rgb = float3(1, 1, 1);
+static const float object_mix = 0;
+static const float object_opacity = ${opacity};
+${colorObject}
+${prepareShadow}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float4 original = float4(0.5, 0.5, 0.5, 0.5);
+    float4 shadow = prepare_shadow_for_object(
+        float4(0, 0, 0.5, 0.5), original);
+    float4 styled = color_object(original);
+    float4 result = styled + shadow * (1 - styled.a);
+    bool correct = all(abs(result - ${expected}) < 1e-6);
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+    assert.match(assembly,
+      /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+      `full composition opacity ${opacity}`);
+  }
 });
 
 test("shadow overlap preserves continuous source antialiasing", () => {
@@ -699,12 +749,11 @@ ${prepareShadow}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
     float4 original = float4(0.5, 0.5, 0.5, 0.5);
     float4 blue_shadow = float4(0, 0, 1, 1);
-    float4 info = float4(0.25, 0.25, 1, 1);
-    float4 shadow = prepare_shadow_for_object(blue_shadow, original, info);
+    float4 shadow = prepare_shadow_for_object(blue_shadow, original);
     float4 styled = color_object(original);
     float4 result = styled + shadow * (1 - styled.a);
     float4 no_shadow = prepare_shadow_for_object(
-        float4(0, 0, 0, 0), original, float4(0, 0, 0, 0));
+        float4(0, 0, 0, 0), original);
     float4 transparent_result = styled + no_shadow * (1 - styled.a);
     bool correct = all(abs(result - float4(0.5, 0.5, 1, 1)) < 1e-6)
         && all(abs(transparent_result - original) < 1e-6);
@@ -753,8 +802,7 @@ ${prepareShadow}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
     float4 shadow = float4(0, 0, 0.5, 0.5);
     float4 source_sample = ${testCase.sourceValue};
-    float4 info = float4(0.25, 0.125, 1, 0.5);
-    float4 result = prepare_shadow_for_object(shadow, source_sample, info);
+    float4 result = prepare_shadow_for_object(shadow, source_sample);
     bool correct = all(abs(result - ${testCase.expected}) < 1e-6);
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
@@ -779,8 +827,7 @@ ${prepareShadow}
 float4 testmain(float4 pos : SV_Position) : SV_Target {
     float4 original = float4(0.5, 0.5, 0.5, 0.5);
     float4 blue_shadow = float4(0, 0, 1, 1);
-    float4 info = float4(0.25, 0.25, 1, 1);
-    float4 prepared = prepare_shadow_for_object(blue_shadow, original, info);
+    float4 prepared = prepare_shadow_for_object(blue_shadow, original);
     float4 styled = color_object(original);
     float4 result = styled + prepared * (1 - styled.a);
     bool correct = all(abs(result - float4(0.5, 0, 0.5, 1)) < 1e-6);
