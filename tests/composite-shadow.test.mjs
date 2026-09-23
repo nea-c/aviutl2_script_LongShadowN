@@ -264,6 +264,52 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
   );
 });
 
+test("packed inverse shadow keeps source coordinates distance and coverage channels", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const packInverseShadow = extractFunction(source, "pack_inverse_shadow");
+  const assembly = compileConstantResult(`
+${packInverseShadow}
+
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float4 result = pack_inverse_shadow(float2(0.25, 0.75), 0.4, 0.5);
+    bool correct = all(abs(result - float4(0.25, 0.2, 0.75, 0.5)) < 1e-6);
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+  assert.match(
+    assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+  );
+});
+
+test("inverse direct shader and Lua call share the constant and packed texture contract", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@inverse_raymarch_shadow:\s*([\s\S]*?)\]\]/,
+  );
+  assert.ok(shader, "inverse_raymarch_shadow shader was not found");
+  assert.match(shader[1], /Texture2D source_texture : register\(t0\)/);
+  assert.match(shader[1], /cbuffer constant0 : register\(b0\) \{\s*float2 buffer_size;\s*float2 source_offset;\s*float2 source_size;\s*float2 projection_origin;\s*float target_scale;\s*float quality_step;\s*float work_scale;\s*\};/);
+
+  const renderer = source.match(
+    /local function render_inverse_direct\([\s\S]*?\r?\nend/,
+  );
+  assert.ok(renderer, "render_inverse_direct was not found");
+  assert.match(renderer[0], /obj\.pixelshader\("inverse_raymarch_shadow", "cache:longshadown_shadow_a",\s*"cache:longshadown_source",\s*\{ buffer_w, buffer_h, source_offset_x, source_offset_y,\s*source_w, source_h, source_pos_x, source_pos_y,\s*target_scale, quality_step, work_scale \}, "copy", "clamp"\)/);
+  assert.match(renderer[0], /return target_scale, refine_sample_count, quality_step/);
+});
+
+test("inverse direct dispatch keeps Ultra Directional and Radial paths unchanged", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const dispatch = source.match(
+    /if effective_quality == 3 then[\s\S]*?\r?\n    end\r?\n    style_and_filter_shadow\([\s\S]*?inverse_quality_step\)/,
+  );
+  assert.ok(dispatch, "shadow renderer dispatch was not found");
+  assert.match(dispatch[0], /if effective_quality == 3 then[\s\S]*?render_ultra_raymarch\([\s\S]*?elseif shadow_type == 0 then[\s\S]*?render_fast_directional\([\s\S]*?elseif shadow_type == 1 then[\s\S]*?render_radial_scale\([\s\S]*?elseif shadow_type == 2 then[\s\S]*?render_inverse_direct\(/);
+  assert.match(dispatch[0], /target_scale, refine_sample_count, inverse_quality_step = render_inverse_direct/);
+  assert.match(dispatch[0], /style_and_filter_shadow\([\s\S]*?refine_samples, inverse_quality_step\)/);
+});
+
 test("fade controls expose percent values while shaders receive normalized values", () => {
   const source = readFileSync(scriptPath, "utf8");
   const readTrack = (name) => {

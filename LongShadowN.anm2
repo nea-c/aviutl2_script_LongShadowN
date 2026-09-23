@@ -154,6 +154,68 @@ float sample_source_alpha_ultra(float2 pixel) {
     return saturate(source_texture.SampleLevel(linear_sampler,
         local / source_size, 0).a);
 }
+float4 raymarch_shadow(float4 pos : SV_Position) : SV_Target {
+    float2 pixel = pos.xy / work_scale;
+    float active_sample_count = sample_count;
+    if (shadow_type >= 0.5) {
+        float safe_scale = max(target_scale, 1e-6);
+        float radial_speed = length(pixel - projection_origin)
+            * abs(log(safe_scale)) * max(1, 1 / safe_scale);
+        active_sample_count = min(8001,
+            max(active_sample_count, ceil(radial_speed * work_scale) + 1));
+    }
+    float coverage = 0;
+    float first_distance = 1;
+    float2 source_coordinate = 0;
+    bool found_source = false;
+    [loop]
+    for (int sample = 0; sample < 8001; ++sample) {
+        if (sample >= active_sample_count) break;
+        float distance = sample == active_sample_count - 1
+            ? 1 : sample / max(active_sample_count - 1, 1);
+        float2 source_pixel;
+        if (shadow_type < 0.5) {
+            source_pixel = pixel - direction * (distance * total_length);
+        } else {
+            float projection_scale = pow(max(target_scale, 1e-6), distance);
+            source_pixel = projection_origin
+                + (pixel - projection_origin) / projection_scale;
+        }
+        float sample_alpha = sample_source_alpha_ultra(source_pixel);
+        if (sample_alpha > 0.0001 && !found_source) {
+            first_distance = distance;
+            float2 source_local = clamp(floor(source_pixel - source_offset),
+                0, source_size - 1);
+            source_coordinate = 0.125
+                + 0.75 * (source_local + 0.5) / source_size;
+            found_source = true;
+        }
+        coverage += (1 - coverage) * sample_alpha;
+        if (coverage >= 0.9999) break;
+    }
+    return float4(source_coordinate.x, first_distance * coverage,
+        source_coordinate.y, coverage);
+}
+]]
+
+--[[pixelshader@inverse_raymarch_shadow:
+Texture2D source_texture : register(t0);
+SamplerState linear_sampler : register(s0);
+cbuffer constant0 : register(b0) {
+    float2 buffer_size;
+    float2 source_offset;
+    float2 source_size;
+    float2 projection_origin;
+    float target_scale;
+    float quality_step;
+    float work_scale;
+};
+float sample_source_alpha_inverse(float2 pixel) {
+    float2 local = pixel - source_offset;
+    if (any(local < 0) || any(local >= source_size)) return 0;
+    return saturate(source_texture.SampleLevel(linear_sampler,
+        local / source_size, 0).a);
+}
 bool inverse_ray_interval(float2 pixel, float2 origin,
     float2 bounds_min, float2 bounds_max, float target_scale,
     out float start_distance, out float end_distance, out float source_span) {
@@ -240,47 +302,47 @@ bool inverse_ray_interval(float2 pixel, float2 origin,
     source_span = length(delta) * max(last_u - first_u, 0);
     return end_distance >= start_distance;
 }
-float4 raymarch_shadow(float4 pos : SV_Position) : SV_Target {
+float4 pack_inverse_shadow(float2 encoded_source, float first_distance,
+    float coverage) {
+    return float4(encoded_source.x, first_distance * coverage,
+        encoded_source.y, coverage);
+}
+float4 inverse_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
     float2 pixel = pos.xy / work_scale;
-    float active_sample_count = sample_count;
-    if (shadow_type >= 0.5) {
-        float safe_scale = max(target_scale, 1e-6);
-        float radial_speed = length(pixel - projection_origin)
-            * abs(log(safe_scale)) * max(1, 1 / safe_scale);
-        active_sample_count = min(8001,
-            max(active_sample_count, ceil(radial_speed * work_scale) + 1));
-    }
+    float start_distance, end_distance, source_span;
+    if (!inverse_ray_interval(pixel, projection_origin, source_offset,
+            source_offset + source_size, target_scale,
+            start_distance, end_distance, source_span)) return 0;
+
+    int active_samples = min(8001,
+        max(2, (int)ceil(source_span * work_scale / quality_step) + 1));
     float coverage = 0;
     float first_distance = 1;
-    float2 source_coordinate = 0;
+    float2 first_source_coordinate = 0;
     bool found_source = false;
+
     [loop]
     for (int sample = 0; sample < 8001; ++sample) {
-        if (sample >= active_sample_count) break;
-        float distance = sample == active_sample_count - 1
-            ? 1 : sample / max(active_sample_count - 1, 1);
-        float2 source_pixel;
-        if (shadow_type < 0.5) {
-            source_pixel = pixel - direction * (distance * total_length);
-        } else {
-            float projection_scale = pow(max(target_scale, 1e-6), distance);
-            source_pixel = projection_origin
-                + (pixel - projection_origin) / projection_scale;
-        }
-        float sample_alpha = sample_source_alpha_ultra(source_pixel);
+        if (sample >= active_samples) break;
+        float progress = sample == active_samples - 1
+            ? 1 : sample / max(active_samples - 1.0, 1.0);
+        float distance = lerp(start_distance, end_distance, progress);
+        float projection_scale = pow(max(target_scale, 1e-6), distance);
+        float2 source_pixel = projection_origin
+            + (pixel - projection_origin) / projection_scale;
+        float sample_alpha = sample_source_alpha_inverse(source_pixel);
         if (sample_alpha > 0.0001 && !found_source) {
+            found_source = true;
             first_distance = distance;
             float2 source_local = clamp(floor(source_pixel - source_offset),
                 0, source_size - 1);
-            source_coordinate = 0.125
+            first_source_coordinate = 0.125
                 + 0.75 * (source_local + 0.5) / source_size;
-            found_source = true;
         }
         coverage += (1 - coverage) * sample_alpha;
         if (coverage >= 0.9999) break;
     }
-    return float4(source_coordinate.x, first_distance * coverage,
-        source_coordinate.y, coverage);
+    return pack_inverse_shadow(first_source_coordinate, first_distance, coverage);
 }
 ]]
 
@@ -1154,6 +1216,22 @@ local function render_radial_scale(buffer_w, buffer_h, source_pos_x, source_pos_
     return target_scale, refine_intervals + 1
 end
 
+local function render_inverse_direct(buffer_w, buffer_h,
+    source_pos_x, source_pos_y, work_scale)
+    local target_scale, effective_length = get_radial_projection(
+        shadow_type, shadow_length, source_w, source_h)
+    local quality_step = get_quality_config(effective_quality)
+    local refine_sample_count = math.min(MAX_DIRECT_SAMPLES,
+        math.max(2, math.ceil(effective_length * work_scale / quality_step) + 1))
+    obj.clearbuffer("cache:longshadown_shadow_a", buffer_w, buffer_h)
+    obj.pixelshader("inverse_raymarch_shadow", "cache:longshadown_shadow_a",
+        "cache:longshadown_source",
+        { buffer_w, buffer_h, source_offset_x, source_offset_y,
+          source_w, source_h, source_pos_x, source_pos_y,
+          target_scale, quality_step, work_scale }, "copy", "clamp")
+    return target_scale, refine_sample_count, quality_step
+end
+
 local function render_ultra_raymarch(buffer_w, buffer_h, source_pos_x, source_pos_y, work_scale)
     local target_scale, effective_length = 1, shadow_length
     if shadow_type >= 1 then
@@ -1173,7 +1251,7 @@ local function render_ultra_raymarch(buffer_w, buffer_h, source_pos_x, source_po
 end
 
 local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
-    target_scale, refine_sample_count, refine_samples)
+    target_scale, refine_sample_count, refine_samples, inverse_quality_step)
     local red = math.floor(shadow_color / 65536) % 256 / 255
     local green = math.floor(shadow_color / 256) % 256 / 255
     local blue = shadow_color % 256 / 255
@@ -1261,6 +1339,7 @@ local work_w, work_h = obj.w * work_scale, obj.h * work_scale
 if should_render_shadow then
     local target_scale = 1
     local refine_sample_count
+    local inverse_quality_step = 1
     local _, refine_samples = get_quality_config(effective_quality)
     if effective_quality == 3 then
         target_scale, refine_sample_count = render_ultra_raymarch(
@@ -1268,12 +1347,15 @@ if should_render_shadow then
     elseif shadow_type == 0 then
         refine_sample_count = render_fast_directional(
             work_w, work_h, source_offset_x, source_offset_y, work_scale)
-    elseif shadow_type == 1 or shadow_type == 2 then
+    elseif shadow_type == 1 then
         target_scale, refine_sample_count = render_radial_scale(
+            work_w, work_h, source_pos_x, source_pos_y, work_scale)
+    elseif shadow_type == 2 then
+        target_scale, refine_sample_count, inverse_quality_step = render_inverse_direct(
             work_w, work_h, source_pos_x, source_pos_y, work_scale)
     end
     style_and_filter_shadow(obj.w, obj.h, work_scale,
-        target_scale, refine_sample_count, refine_samples)
+        target_scale, refine_sample_count, refine_samples, inverse_quality_step)
 else
     -- Both caches are current-frame transparency, never previous-frame results.
     obj.clearbuffer("cache:longshadown_shadow_a", obj.w, obj.h)
