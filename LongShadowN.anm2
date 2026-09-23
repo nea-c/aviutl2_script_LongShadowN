@@ -307,6 +307,21 @@ float4 pack_inverse_shadow(float2 encoded_source, float first_distance,
     return float4(encoded_source.x, first_distance * coverage,
         encoded_source.y, coverage);
 }
+float inverse_u_from_distance(float target_scale, float distance) {
+    return 1 / pow(max(target_scale, 1e-6), distance);
+}
+float inverse_distance_from_u(float target_scale, float u) {
+    float safe_scale = max(target_scale, 1e-6);
+    return saturate(log(max(u, 1)) / max(-log(safe_scale), 1e-6));
+}
+float inverse_sample_u(float start_distance, float end_distance,
+    float target_scale, int sample, int active_samples) {
+    float start_u = inverse_u_from_distance(target_scale, start_distance);
+    float end_u = inverse_u_from_distance(target_scale, end_distance);
+    if (sample == active_samples - 1) return end_u;
+    float progress = sample / max(active_samples - 1.0, 1.0);
+    return lerp(start_u, end_u, progress);
+}
 float4 inverse_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
     float2 pixel = pos.xy / work_scale;
     float start_distance, end_distance, source_span;
@@ -324,12 +339,11 @@ float4 inverse_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
     [loop]
     for (int sample = 0; sample < 8001; ++sample) {
         if (sample >= active_samples) break;
-        float progress = sample == active_samples - 1
-            ? 1 : sample / max(active_samples - 1.0, 1.0);
-        float distance = lerp(start_distance, end_distance, progress);
-        float projection_scale = pow(max(target_scale, 1e-6), distance);
+        float sample_u = inverse_sample_u(start_distance, end_distance,
+            target_scale, sample, active_samples);
         float2 source_pixel = projection_origin
-            + (pixel - projection_origin) / projection_scale;
+            + (pixel - projection_origin) * sample_u;
+        float distance = inverse_distance_from_u(target_scale, sample_u);
         float sample_alpha = sample_source_alpha_inverse(source_pixel);
         if (sample_alpha > 0.0001 && !found_source) {
             found_source = true;

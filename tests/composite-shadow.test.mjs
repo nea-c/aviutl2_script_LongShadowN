@@ -299,6 +299,78 @@ test("inverse direct shader and Lua call share the constant and packed texture c
   assert.match(renderer[0], /return target_scale, refine_sample_count, quality_step/);
 });
 
+test("inverse direct samples source-linear intervals within quality spacing", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const distanceToU = extractFunction(source, "inverse_u_from_distance", "float");
+  const uToDistance = extractFunction(source, "inverse_distance_from_u", "float");
+  const sampleU = extractFunction(source, "inverse_sample_u", "float");
+  const assembly = compileConstantResult(`
+${distanceToU}
+${uToDistance}
+${sampleU}
+
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float target_scale = 0.5 / length(float2(512, 512));
+    float delta_length = target_scale * 1024;
+    float start_u = inverse_sample_u(0, 1, target_scale, 0, 257);
+    float draft_previous_u = inverse_sample_u(0, 1, target_scale, 255, 257);
+    float draft_end_u = inverse_sample_u(0, 1, target_scale, 256, 257);
+    float standard_previous_u = inverse_sample_u(0, 1, target_scale, 511, 513);
+    float standard_end_u = inverse_sample_u(0, 1, target_scale, 512, 513);
+    float high_previous_u = inverse_sample_u(0, 1, target_scale, 1023, 1025);
+    float high_end_u = inverse_sample_u(0, 1, target_scale, 1024, 1025);
+    float metadata_u = 17;
+    float metadata_distance = inverse_distance_from_u(target_scale, metadata_u);
+    bool correct = abs(start_u - 1) < 1e-6
+        && abs(draft_end_u - 1 / target_scale) < 1e-3
+        && abs(standard_end_u - 1 / target_scale) < 1e-3
+        && abs(high_end_u - 1 / target_scale) < 1e-3
+        && delta_length * (draft_end_u - draft_previous_u) <= 4.0001
+        && delta_length * (standard_end_u - standard_previous_u) <= 2.0001
+        && delta_length * (high_end_u - high_previous_u) <= 1.0001
+        && abs(inverse_u_from_distance(target_scale, metadata_distance)
+            - metadata_u) < 1e-4;
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+  assert.match(
+    assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+  );
+
+  const shader = source.match(
+    /--\[\[pixelshader@inverse_raymarch_shadow:\s*([\s\S]*?)\]\]/,
+  );
+  assert.ok(shader, "inverse_raymarch_shadow shader was not found");
+  assert.match(shader[1], /float sample_u = inverse_sample_u\(start_distance, end_distance,\s*target_scale, sample, active_samples\)/);
+  assert.match(shader[1], /source_pixel = projection_origin\s*\+ \(pixel - projection_origin\) \* sample_u/);
+  assert.match(shader[1], /distance = inverse_distance_from_u\(target_scale, sample_u\)/);
+});
+
+test("inverse direct Lua quality spacing remains 4 2 and 1 source pixels", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const qualityConfig = source.match(
+    /local function get_quality_config\(level\)([\s\S]*?)\r?\nend/,
+  );
+  assert.ok(qualityConfig, "get_quality_config was not found");
+  assert.match(qualityConfig[1], /\[0\] = \{ sample_step = 4\.0,/);
+  assert.match(qualityConfig[1], /\[1\] = \{ sample_step = 2\.0,/);
+  assert.match(qualityConfig[1], /\[2\] = \{ sample_step = 1\.0,/);
+
+  const renderer = source.match(
+    /local function render_inverse_direct\([\s\S]*?\r?\nend/,
+  );
+  assert.ok(renderer, "render_inverse_direct was not found");
+  assert.match(renderer[0], /math\.ceil\(effective_length \* work_scale \/ quality_step\) \+ 1/);
+  assert.match(renderer[0], /math\.min\(MAX_DIRECT_SAMPLES,/);
+
+  const convergedSourceSpan = 1024 - Math.SQRT1_2;
+  const activeCounts = [4, 2, 1].map(
+    (qualityStep) => Math.ceil(convergedSourceSpan / qualityStep) + 1,
+  );
+  assert.deepEqual(activeCounts, [257, 513, 1025]);
+});
+
 test("inverse direct dispatch keeps Ultra Directional and Radial paths unchanged", () => {
   const source = readFileSync(scriptPath, "utf8");
   const dispatch = source.match(
