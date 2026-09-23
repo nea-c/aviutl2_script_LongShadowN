@@ -5,6 +5,8 @@
     ".gitignore",
     "/*.zip",
     "tests/",
+    ".superpowers/",
+    "docs/",
     "resources_zip.bat",
     "resources_zip.json"
   ]
