@@ -838,18 +838,9 @@ float4 color_object(float4 source) {
 }
 float4 neutralize_shadow(float4 shadow, float4 source) {
     float source_support = saturate(source.a * 255);
-    if (source_support <= 0) return shadow;
-    // Reinforce antialiased source edges with an object-colored backing. Its
-    // opacity follows Object Color only, so Shadow::Opacity cannot darken the
-    // source edge and Object::Opacity can still hide it completely.
-    float object_alpha = source.a * object_opacity;
-    float reinforced_alpha = object_opacity;
-    float backing_alpha = saturate((reinforced_alpha - object_alpha)
-        / max(1 - object_alpha, 1e-6));
-    float3 straight_rgb = source.rgb / max(source.a, 1e-6);
-    float3 rgb = lerp(straight_rgb, object_rgb, object_mix);
-    float4 backing = float4(rgb * backing_alpha, backing_alpha);
-    return lerp(shadow, backing, source_support);
+    // Keep the source's original antialiased alpha. Suppress only the shadow
+    // behind its one-byte coverage support so it cannot form a dark fringe.
+    return shadow * (1 - source_support);
 }
 float4 composite_shadow(float4 pos : SV_Position) : SV_Target {
     float4 shadow = shadow_texture[int2(pos.xy)];
