@@ -984,38 +984,6 @@ test("edge refinement emits per-sample faded coverage in resolved red", () => {
     /float4 contribution\s*=\s*float4\(coverage, weighted_distance,/);
 });
 
-test("Fade Out ray sampling prefilters source AA without altering source compositing", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const filter = source.match(
-    /--\[\[pixelshader@prefilter_shadow_mask:([\s\S]*?)\]\]/,
-  )?.[1];
-  assert.ok(filter, "source AA prefilter shader was not found");
-  assert.match(filter, /int weights\[5\]\s*=\s*\{\s*1,\s*4,\s*6,\s*4,\s*1\s*\}/);
-  assert.match(filter, /weighted_alpha \/ 256/);
-  assert.match(source, /if should_render_shadow and fade_out > 0 then[\s\S]*?obj\.pixelshader\("prefilter_shadow_mask"/);
-  assert.match(source, /shadow_sample_source = "cache:longshadown_shadow_mask"/);
-  assert.match(source, /obj\.pixelshader\("direct_raymarch_shadow"[\s\S]*?shadow_sample_source/);
-  assert.match(source, /obj\.pixelshader\("edge_antialias"[\s\S]*?"cache:longshadown_resolved", shadow_sample_source/);
-  assert.match(source, /obj\.pixelshader\("composite_shadow"[\s\S]*?"cache:longshadown_source"/);
-});
-
-test("Fade Out smooths residual shadow coverage after edge refinement", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const shader = source.match(
-    /--\[\[pixelshader@smooth_fade_shadow:([\s\S]*?)\]\]/,
-  )?.[1];
-  assert.ok(shader, "Fade output smoothing shader was not found");
-  assert.match(shader, /int weights\[3\]\s*=\s*\{\s*1,\s*2,\s*1\s*\}/);
-  assert.match(shader, /return sum \/ 16/);
-  const style = source.match(
-    /local function style_and_filter_shadow\([\s\S]*?\r?\nend/,
-  )?.[0];
-  assert.ok(style, "style_and_filter_shadow was not found");
-  assert.match(style, /if fade_out > 0 and blur_shadow == 0 then[\s\S]*?obj\.pixelshader\("smooth_fade_shadow"/);
-  assert.ok(style.indexOf('obj.pixelshader("edge_antialias"')
-    < style.indexOf('obj.pixelshader("smooth_fade_shadow"'));
-});
-
 test("opaque non-edge roots keep the fast path", () => {
   const source = readFileSync(scriptPath, "utf8");
   const shader = source.match(

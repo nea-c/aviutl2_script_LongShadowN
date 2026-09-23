@@ -75,30 +75,6 @@
 --track@blur_shadow:Blur Shadow,0,4000,0,0.1
 --group
 
---[[pixelshader@prefilter_shadow_mask:
-Texture2D source_texture : register(t0);
-cbuffer constant0 : register(b0) {
-    float2 source_size;
-};
-float4 prefilter_shadow_mask(float4 pos : SV_Position) : SV_Target {
-    int2 center = int2(pos.xy);
-    int weights[5] = { 1, 4, 6, 4, 1 };
-    float weighted_alpha = 0;
-    [unroll]
-    for (int y = -2; y <= 2; ++y) {
-        [unroll]
-        for (int x = -2; x <= 2; ++x) {
-            int2 sample_position = center + int2(x, y);
-            if (any(sample_position < 0)
-                || any(sample_position >= int2(source_size))) continue;
-            weighted_alpha += source_texture[sample_position].a
-                * weights[x + 2] * weights[y + 2];
-        }
-    }
-    return float4(0, 0, 0, saturate(weighted_alpha / 256));
-}
-]]
-
 --[[pixelshader@direct_raymarch_shadow:
 Texture2D source_texture : register(t0);
 SamplerState linear_sampler : register(s0);
@@ -920,30 +896,6 @@ float4 smooth_shadow(float4 pos : SV_Position) : SV_Target {
 }
 ]]
 
---[[pixelshader@smooth_fade_shadow:
-Texture2D styled_texture : register(t0);
-cbuffer constant0 : register(b0) {
-    float2 buffer_size;
-};
-float4 smooth_fade_shadow(float4 pos : SV_Position) : SV_Target {
-    int2 center = int2(pos.xy);
-    int2 maximum = int2(buffer_size) - 1;
-    int weights[3] = { 1, 2, 1 };
-    float4 sum = 0;
-    [unroll]
-    for (int y = -1; y <= 1; ++y) {
-        [unroll]
-        for (int x = -1; x <= 1; ++x) {
-            int2 sample_position = clamp(center + int2(x, y),
-                int2(0, 0), maximum);
-            sum += styled_texture[sample_position]
-                * weights[x + 1] * weights[y + 1];
-        }
-    }
-    return sum / 16;
-}
-]]
-
 --[[pixelshader@blur_shadow:
 Texture2D styled_texture : register(t0);
 Texture2D distance_texture : register(t1);
@@ -1296,11 +1248,10 @@ source_pos_y = source_pos_y + source_offset_y + source_h / 2
 local has_texture, texture_w, texture_h = load_shadow_texture(should_render_shadow)
 -- External effects may use the same names. Reset scratch resources after their
 -- evaluation, then overwrite every source/resource before any subsequent read.
-for _, name in ipairs({ "shadow_a", "shadow_b", "shadow_c", "resolved", "source_color", "final", "filtered", "source", "shadow_mask", "layer_front" }) do
+for _, name in ipairs({ "shadow_a", "shadow_b", "shadow_c", "resolved", "source_color", "final", "filtered", "source", "layer_front" }) do
     obj.clearbuffer("cache:longshadown_" .. name, 1, 1)
 end
 
-local shadow_sample_source = "cache:longshadown_source"
 local function render_direct_shadow(buffer_w, buffer_h,
     source_pos_x, source_pos_y, work_scale, layer_selector)
     local target_scale, effective_length = 1, shadow_length
@@ -1313,7 +1264,7 @@ local function render_direct_shadow(buffer_w, buffer_h,
         math.max(2, math.ceil(effective_length * work_scale / quality_step) + 1))
     obj.clearbuffer("cache:longshadown_shadow_a", buffer_w, buffer_h)
     obj.pixelshader("direct_raymarch_shadow", "cache:longshadown_shadow_a",
-        shadow_sample_source,
+        "cache:longshadown_source",
         { buffer_w, buffer_h, source_offset_x, source_offset_y,
           source_w, source_h, source_pos_x, source_pos_y,
           math.cos(math.rad(angle)), math.sin(math.rad(angle)),
@@ -1342,7 +1293,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
           source_offset_x, source_offset_y, 0, source_w, source_h }, "copy", "clamp")
     obj.clearbuffer("cache:longshadown_shadow_b", buffer_w, buffer_h)
     obj.pixelshader("edge_antialias", "cache:longshadown_shadow_b",
-        { "cache:longshadown_resolved", shadow_sample_source },
+        { "cache:longshadown_resolved", "cache:longshadown_source" },
         { buffer_w, buffer_h, source_offset_x, source_offset_y, source_w, source_h,
           source_pos_x, source_pos_y, math.cos(math.rad(angle)), math.sin(math.rad(angle)),
           shadow_length, target_scale, shadow_type, refine_sample_count, refine_samples,
@@ -1380,12 +1331,6 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
             { buffer_w, buffer_h }, "copy", "clip")
         obj.copybuffer("cache:longshadown_final", "cache:longshadown_filtered")
     end
-    if fade_out > 0 and blur_shadow == 0 then
-        obj.clearbuffer("cache:longshadown_filtered", buffer_w, buffer_h)
-        obj.pixelshader("smooth_fade_shadow", "cache:longshadown_filtered",
-            "cache:longshadown_final", { buffer_w, buffer_h }, "copy", "clip")
-        obj.copybuffer("cache:longshadown_final", "cache:longshadown_filtered")
-    end
     if blur_shadow > 0 then
         obj.clearbuffer("cache:longshadown_blur_distance_a", buffer_w, buffer_h)
         obj.pixelshader("spread_blur_distance", "cache:longshadown_blur_distance_a",
@@ -1410,13 +1355,6 @@ obj.copybuffer("cache:longshadown_source", "object")
 obj.cx = obj.cx - (right - left) / 2
 obj.cy = obj.cy - (bottom - top) / 2
 obj.effect("領域拡張", "上", top, "下", bottom, "左", left, "右", right, "塗りつぶし", 1)
-
-if should_render_shadow and fade_out > 0 then
-    obj.clearbuffer("cache:longshadown_shadow_mask", source_w, source_h)
-    obj.pixelshader("prefilter_shadow_mask", "cache:longshadown_shadow_mask",
-        "cache:longshadown_source", { source_w, source_h }, "copy", "clamp")
-    shadow_sample_source = "cache:longshadown_shadow_mask"
-end
 
 local requested_work_scale = supersampling == 1 and 2 or 1
 local work_scale = requested_work_scale
