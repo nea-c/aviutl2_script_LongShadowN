@@ -447,7 +447,7 @@ test("fade controls expose percent values while shaders receive normalized value
   assert.deepEqual(readTrack("fade_out"), [0, 100, 50]);
 
   const directCall = source.match(
-    /obj\.pixelshader\("direct_raymarch_shadow"[\s\S]*?quality_step, work_scale,\s*([^,]+), ([^}]+) \}/,
+    /obj\.pixelshader\("direct_raymarch_shadow"[\s\S]*?quality_step, work_scale,\s*([^,]+), ([^,}]+), layer_selector \}/,
   );
   assert.ok(directCall, "direct_raymarch_shadow call was not found");
   const antialiasCall = source.match(
@@ -755,6 +755,18 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     return correct ? float4(0,1,0,1) : float4(1,0,0,1);
 }`);
   assert.match(assembly, /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/);
+});
+
+test("Directional blur alone routes through both shadow layers", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const renderBlock = source.slice(source.lastIndexOf("if should_render_shadow then"),
+    source.indexOf("local object_red", source.lastIndexOf("if should_render_shadow then")));
+  assert.match(renderBlock, /shadow_type == 0 and blur_shadow > 0/);
+  assert.match(renderBlock, /for layer = 0, 1 do/);
+  assert.match(renderBlock, /combine_shadow_layers/);
+  assert.match(renderBlock, /work_scale, -1\)/);
+  assert.match(source, /"layer_front"/);
+  assert.match(renderBlock, /else[\s\S]*obj\.clearbuffer\("cache:longshadown_final", obj\.w, obj\.h\)/);
 });
 
 test("Fade sample switches keep blur distance continuous near the shadow root", () => {

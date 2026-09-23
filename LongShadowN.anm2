@@ -1248,12 +1248,12 @@ source_pos_y = source_pos_y + source_offset_y + source_h / 2
 local has_texture, texture_w, texture_h = load_shadow_texture(should_render_shadow)
 -- External effects may use the same names. Reset scratch resources after their
 -- evaluation, then overwrite every source/resource before any subsequent read.
-for _, name in ipairs({ "shadow_a", "shadow_b", "shadow_c", "resolved", "source_color", "final", "filtered", "source" }) do
+for _, name in ipairs({ "shadow_a", "shadow_b", "shadow_c", "resolved", "source_color", "final", "filtered", "source", "layer_front" }) do
     obj.clearbuffer("cache:longshadown_" .. name, 1, 1)
 end
 
 local function render_direct_shadow(buffer_w, buffer_h,
-    source_pos_x, source_pos_y, work_scale)
+    source_pos_x, source_pos_y, work_scale, layer_selector)
     local target_scale, effective_length = 1, shadow_length
     if shadow_type >= 1 then
         target_scale, effective_length = get_radial_projection(
@@ -1269,7 +1269,7 @@ local function render_direct_shadow(buffer_w, buffer_h,
           source_w, source_h, source_pos_x, source_pos_y,
           math.cos(math.rad(angle)), math.sin(math.rad(angle)),
           shadow_length, target_scale, shadow_type, quality_step, work_scale,
-          fade_in / 100, fade_out / 100 },
+          fade_in / 100, fade_out / 100, layer_selector },
         "copy", "clamp")
     return target_scale, refine_sample_count, quality_step
 end
@@ -1298,7 +1298,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
           source_pos_x, source_pos_y, math.cos(math.rad(angle)), math.sin(math.rad(angle)),
           shadow_length, target_scale, shadow_type, refine_sample_count, refine_samples,
           fade_in / 100, fade_out / 100, effective_quality >= 2 and 1 or 0,
-          direct_quality_step, work_scale }, "copy", "clamp")
+          direct_quality_step, work_scale, layer_selector }, "copy", "clamp")
     obj.copybuffer("cache:longshadown_resolved", "cache:longshadown_shadow_b")
     obj.clearbuffer("cache:longshadown_final", buffer_w, buffer_h)
     -- Clamp preserves the 1D endpoints; wrapped UVs and the loop sampler give
@@ -1367,11 +1367,26 @@ local work_w, work_h = obj.w * work_scale, obj.h * work_scale
 
 if should_render_shadow then
     local _, refine_samples = get_quality_config(effective_quality)
-    local target_scale, refine_sample_count, direct_quality_step = render_direct_shadow(
-        work_w, work_h, source_pos_x, source_pos_y, work_scale)
-    style_and_filter_shadow(obj.w, obj.h, work_scale,
-        target_scale, refine_sample_count, refine_samples, direct_quality_step,
-        shadow_opacity / 100, -1)
+    if shadow_type == 0 and blur_shadow > 0 then
+        for layer = 0, 1 do
+            local target_scale, count, step = render_direct_shadow(
+                work_w, work_h, source_pos_x, source_pos_y, work_scale, layer)
+            style_and_filter_shadow(obj.w, obj.h, work_scale,
+                target_scale, count, refine_samples, step, 1, layer)
+            if layer == 0 then
+                obj.copybuffer("cache:longshadown_layer_front", "cache:longshadown_final")
+            end
+        end
+        obj.pixelshader("combine_shadow_layers", "cache:longshadown_filtered",
+            { "cache:longshadown_layer_front", "cache:longshadown_final" },
+            { shadow_opacity / 100 }, "copy", "clamp")
+        obj.copybuffer("cache:longshadown_final", "cache:longshadown_filtered")
+    else
+        local target_scale, count, step = render_direct_shadow(
+            work_w, work_h, source_pos_x, source_pos_y, work_scale, -1)
+        style_and_filter_shadow(obj.w, obj.h, work_scale,
+            target_scale, count, refine_samples, step, shadow_opacity / 100, -1)
+    end
 else
     -- Both caches are current-frame transparency, never previous-frame results.
     obj.clearbuffer("cache:longshadown_shadow_a", obj.w, obj.h)
