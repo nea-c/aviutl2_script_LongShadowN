@@ -988,6 +988,22 @@ float4 spread_blur_distance(float4 pos : SV_Position) : SV_Target {
 }
 ]]
 
+--[[pixelshader@combine_shadow_layers:
+Texture2D front_texture : register(t0);
+Texture2D rear_texture : register(t1);
+cbuffer constant0 : register(b0) {
+    float shadow_opacity;
+};
+float4 combine_layer_colors(float4 front, float4 rear, float opacity) {
+    float rear_weight = max(0, rear.a - front.a) / max(rear.a, 1e-6);
+    return (front + rear * rear_weight) * opacity;
+}
+float4 combine_shadow_layers(float4 pos : SV_Position) : SV_Target {
+    return combine_layer_colors(front_texture[int2(pos.xy)],
+        rear_texture[int2(pos.xy)], shadow_opacity);
+}
+]]
+
 --[[pixelshader@composite_shadow:
 Texture2D shadow_texture : register(t0);
 Texture2D source_texture : register(t1);
@@ -1259,7 +1275,8 @@ local function render_direct_shadow(buffer_w, buffer_h,
 end
 
 local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
-    target_scale, refine_sample_count, refine_samples, direct_quality_step)
+    target_scale, refine_sample_count, refine_samples, direct_quality_step,
+    opacity_value, layer_selector)
     direct_quality_step = direct_quality_step or 0
     local red = math.floor(shadow_color / 65536) % 256 / 255
     local green = math.floor(shadow_color / 256) % 256 / 255
@@ -1289,7 +1306,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
     if texture_repeat then
         obj.pixelshader("style_shadow", "cache:longshadown_final",
             { "cache:longshadown_resolved", "cache:longshadown_texture", "cache:longshadown_source_color" },
-            { buffer_w, buffer_h, texture_x, texture_y, red, green, blue, shadow_opacity / 100,
+            { buffer_w, buffer_h, texture_x, texture_y, red, green, blue, opacity_value,
               texture_type, repeat_flag,
               texture_type == 1 and texture_1d_scale or texture_2d_scale_x,
               texture_type == 2 and texture_2d_scale_y or 100,
@@ -1299,7 +1316,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
     else
         obj.pixelshader("style_shadow", "cache:longshadown_final",
             { "cache:longshadown_resolved", "cache:longshadown_texture", "cache:longshadown_source_color" },
-            { buffer_w, buffer_h, texture_x, texture_y, red, green, blue, shadow_opacity / 100,
+            { buffer_w, buffer_h, texture_x, texture_y, red, green, blue, opacity_value,
               texture_type, repeat_flag,
               texture_type == 1 and texture_1d_scale or texture_2d_scale_x,
               texture_type == 2 and texture_2d_scale_y or 100,
@@ -1353,7 +1370,8 @@ if should_render_shadow then
     local target_scale, refine_sample_count, direct_quality_step = render_direct_shadow(
         work_w, work_h, source_pos_x, source_pos_y, work_scale)
     style_and_filter_shadow(obj.w, obj.h, work_scale,
-        target_scale, refine_sample_count, refine_samples, direct_quality_step)
+        target_scale, refine_sample_count, refine_samples, direct_quality_step,
+        shadow_opacity / 100, -1)
 else
     -- Both caches are current-frame transparency, never previous-frame results.
     obj.clearbuffer("cache:longshadown_shadow_a", obj.w, obj.h)

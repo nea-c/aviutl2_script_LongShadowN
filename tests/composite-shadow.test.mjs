@@ -423,7 +423,7 @@ test("edge refinement mirrors generalized Direct traversal", () => {
   assert.ok(style, "style_and_filter_shadow was not found");
   assert.match(
     style[0],
-    /target_scale, refine_sample_count, refine_samples, direct_quality_step\)/,
+    /target_scale, refine_sample_count, refine_samples, direct_quality_step,\s*opacity_value, layer_selector\)/,
   );
   assert.match(style[0], /direct_quality_step = direct_quality_step or 0/);
   assert.match(
@@ -735,6 +735,23 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     accumulate_layered_sample(.7, 0, .8, 1, 0, opaque);
     bool opaque_ok = pack_layered_shadow(opaque,1).a>.69;
     bool correct = split_ok && continuous_ok && fade_ok && opaque_ok;
+    return correct ? float4(0,1,0,1) : float4(1,0,0,1);
+}`);
+  assert.match(assembly, /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/);
+});
+
+test("layer combine applies correlated coverage and global opacity once", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(/--\[\[pixelshader@combine_shadow_layers:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(shader, "combine_shadow_layers shader was not found");
+  const combine = extractFunction(shader, "combine_layer_colors");
+  const assembly = compileConstantResult(`
+${combine}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float4 result = combine_layer_colors(float4(.4,0,0,.4), float4(0,0,.5,.5), .5);
+    float4 opaque = combine_layer_colors(float4(.3,.2,.1,1), float4(0,0,.5,.5), .5);
+    bool correct = all(abs(result-float4(.2,0,.05,.25))<1e-5)
+        && all(abs(opaque-float4(.15,.1,.05,.5))<1e-5);
     return correct ? float4(0,1,0,1) : float4(1,0,0,1);
 }`);
   assert.match(assembly, /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/);
