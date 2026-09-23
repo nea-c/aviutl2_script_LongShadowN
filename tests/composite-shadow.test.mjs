@@ -679,8 +679,8 @@ float2 accumulate_reverse() {
 float4 testmain(float4 pos : SV_Position) : SV_Target {
     float2 forward = accumulate_forward();
     float2 reverse = accumulate_reverse();
-    bool correct = all(abs(forward - float2(0.84375, 0.6328125)) < 1e-6)
-        && all(abs(reverse - forward) < 1e-6);
+    bool correct = all(abs(forward - float2(0.84375, 0.625)) < 1e-6)
+        && all(abs(reverse - float2(0.84375, 0.6328125)) < 1e-6);
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
@@ -689,6 +689,49 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
       `${shaderName} let a weak first hit choose Fade for a stronger later hit`);
     assert.doesNotMatch(shader, /first_distance/,
       `${shaderName} still applies one first-hit Fade weight to the whole ray`);
+  }
+});
+
+test("Fade sample switches keep blur distance continuous near the shadow root", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  for (const shaderName of ["direct_raymarch_shadow", "edge_antialias"]) {
+    const shader = source.match(
+      new RegExp(`--\\[\\[pixelshader@${shaderName}:([\\s\\S]*?)\\]\\]`),
+    )?.[1];
+    assert.ok(shader, `${shaderName} shader was not found`);
+    const helpers = [
+      extractFunction(shader, "union_coverage", "float"),
+      extractFunction(shader, "shadow_only_coverage", "float"),
+      extractFunction(shader, "conditional_shadow_coverage", "float"),
+      extractFunction(shader, "fade_weight_sample", "float"),
+      extractFunction(shader, "accumulate_faded_shadow_sample", "bool"),
+    ].join("\n");
+    const assembly = compileConstantResult(`
+static const float fade_in = 1;
+static const float fade_out = 0.5;
+${helpers}
+float2 sample_ray(float near_alpha) {
+    float coverage = 0;
+    float weighted_distance = 0;
+    accumulate_faded_shadow_sample(near_alpha, 0, 0.1,
+        coverage, weighted_distance);
+    accumulate_faded_shadow_sample(1, 0, 0.75,
+        coverage, weighted_distance);
+    return float2(coverage, weighted_distance / coverage);
+}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float2 below = sample_ray(0.49);
+    float2 above = sample_ray(0.51);
+    bool correct = abs(below.x - 0.5) < 1e-6
+        && abs(above.x - 0.51) < 1e-6
+        && abs(below.y - 0.113) < 1e-6
+        && abs(above.y - 0.1) < 1e-6;
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+    assert.match(assembly,
+      /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+      `${shaderName} made Blur Shadow jump when the winning Fade sample changed`);
   }
 });
 

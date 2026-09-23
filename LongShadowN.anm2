@@ -56,7 +56,6 @@
 --track@texture_2d_scale_y:Texture::Scale Y,1,4000,100,0.001
 --check@texture_repeat:Texture::Repeat,false
 --track@texture_color_mix:Texture::Mix,0,100,100,0.01
---track@texture_alpha_mix:Texture::Opacity,0,100,100,0.01
 --hide@texture_layer:texture_type==0
 --hide@texture_x:texture_type<2
 --hide@texture_y:texture_type<2
@@ -68,7 +67,6 @@
 --hide@texture_2d_scale_y:texture_2d_scale_link==1
 --hide@texture_repeat:texture_type==0
 --hide@texture_color_mix:texture_type==0
---hide@texture_alpha_mix:texture_type==0
 --group
 
 --group:Post-processing,false
@@ -132,8 +130,8 @@ bool accumulate_faded_shadow_sample(float sample_alpha, float root_alpha,
         sample_alpha, root_alpha) * fade_weight_sample(distance);
     float combined = union_coverage(coverage, candidate);
     if (combined <= coverage + 1e-7) return false;
+    weighted_distance += distance * (combined - coverage);
     coverage = combined;
-    weighted_distance = distance * combined;
     return true;
 }
 bool clip_parameter_axis(float origin, float delta, float bounds_min,
@@ -360,8 +358,8 @@ bool accumulate_faded_shadow_sample(float sample_alpha, float root_alpha,
         sample_alpha, root_alpha) * fade_weight_sample(distance);
     float combined = union_coverage(coverage, candidate);
     if (combined <= coverage + 1e-7) return false;
+    weighted_distance += distance * (combined - coverage);
     coverage = combined;
-    weighted_distance = distance * combined;
     return true;
 }
 bool clip_parameter_axis(float origin, float delta, float bounds_min,
@@ -641,7 +639,6 @@ cbuffer constant0 : register(b0) {
     float2 texture_size;
     float has_texture;
     float texture_color_mix;
-    float texture_alpha_mix;
     float shadow_mix;
     float shadow_type;
     float target_scale;
@@ -722,7 +719,7 @@ float4 style_shadow(float4 pos : SV_Position) : SV_Target {
     // so color-only influence does not dim partially transparent texels twice.
     float3 texture_rgb = texel.rgb / max(texel.a, 1e-6);
     float3 final_rgb = lerp(mixed_shadow_rgb, texture_rgb, texture_color_mix);
-    float final_alpha = solid_alpha * lerp(1, texel.a, texture_alpha_mix);
+    float final_alpha = solid_alpha * texel.a;
     return float4(final_rgb * final_alpha, final_alpha);
 }
 ]]
@@ -1193,7 +1190,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
               texture_type == 1 and texture_1d_scale or texture_2d_scale_x,
               texture_type == 2 and texture_2d_scale_y or 100,
               texture_mapping, texture_w, texture_h, has_texture,
-              texture_color_mix / 100, texture_alpha_mix / 100,
+              texture_color_mix / 100,
               shadow_mix / 100, shadow_type, target_scale }, "copy", "loop")
     else
         obj.pixelshader("style_shadow", "cache:longshadown_final",
@@ -1203,7 +1200,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
               texture_type == 1 and texture_1d_scale or texture_2d_scale_x,
               texture_type == 2 and texture_2d_scale_y or 100,
               texture_mapping, texture_w, texture_h, has_texture,
-              texture_color_mix / 100, texture_alpha_mix / 100,
+              texture_color_mix / 100,
               shadow_mix / 100, shadow_type, target_scale }, "copy", "clamp")
     end
     if post_smooth then

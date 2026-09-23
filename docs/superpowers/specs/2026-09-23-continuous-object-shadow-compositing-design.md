@@ -85,10 +85,16 @@ the source coverage at the exact distance-zero coordinate. Each sample forms:
 
 `F_i = C_i * fade_weight(d_i)`
 
-The ray stores `F = max(F_i)` and the distance/source coordinate belonging to
-the winning sample. Applying Fade after selecting the first hit is invalid: a
+The ray stores `F = max(F_i)` and the source coordinate belonging to the
+winning sample. Applying Fade after selecting the first hit is invalid: a
 weak antialiased hit can then choose the Fade distance for stronger geometry
 later on the ray, producing a step wherever that weak hit appears or disappears.
+
+The distance for Blur Shadow and distance-based styling accumulates the newly
+covered fraction at each sample: `W += d_i * (max(F, F_i) - F)` before updating
+`F`. The resolved distance is `W / F`. Using only the winning sample's distance
+can jump abruptly when two candidates exchange rank while their coverages stay
+almost equal, creating sharp patches in an otherwise blurred shadow.
 
 For 2x supersampling, this complete per-ray result is computed independently
 for every raw work sample before the four results are averaged.
@@ -101,18 +107,18 @@ for opaque roots is therefore removed, avoiding its performance cost.
 The resolved metadata contract becomes:
 
 - `r`: faded conditional shadow-only coverage `F`;
-- `g`: winning distance multiplied by `F`;
+- `g`: accumulated coverage-weighted distance `W`;
 - `b`: existing geometry flag;
-- `a`: `F`, used to normalize the winning distance.
+- `a`: `F`, used to normalize the coverage-weighted distance.
 
-`resolve_source_color` consumes the source coordinate selected by the same
-winning faded sample, keeping color and distance aligned with coverage.
+`resolve_source_color` consumes the source coordinate selected by the winning
+faded sample.
 
 ## Edge Refinement
 
 `edge_antialias` must emit the same metadata contract as the Direct pass.
 Every refined subpixel computes `F_i` for each ray sample and retains the
-maximum together with its matching distance.
+maximum together with its accumulated coverage-weighted distance.
 
 The difference is computed per refined sample before averaging. Both the fast
 non-edge path and the refined path therefore expose identical channel meanings
@@ -146,7 +152,8 @@ This also masks filter spill continuously without a binary cutout.
 ## Data Flow
 
 1. `direct_raymarch_shadow` computes conditional coverage and Fade for every
-   ray sample, retains the maximum `F`, and packs its distance/source coordinate.
+   ray sample, retains the maximum `F`, and packs weighted distance plus the
+   winning source coordinate.
 2. `resolve_source_color` consumes the winning source coordinate.
 3. `resolve_shadow` averages completed raw results for 2x supersampling and
    does not apply Fade again.
@@ -184,8 +191,10 @@ Automated tests will verify:
   `(0.2, 0.6)`;
 - `conditional_shadow_coverage(E, R)` produces `0.6` for `(0.8, 0.5)` and
   safely produces zero for a fully covered root;
-- a weak near hit followed by a strong far hit produces the same faded result
+- a weak near hit followed by a strong far hit produces the same faded coverage
   regardless of sample order;
+- a near/far winner switch keeps the normalized distance continuous for Blur
+  Shadow;
 - `resolve_shadow` does not apply Fade a second time;
 - 2x resolution computes `D` per raw work sample before averaging, using input
   values where averaging first would produce a different result;
