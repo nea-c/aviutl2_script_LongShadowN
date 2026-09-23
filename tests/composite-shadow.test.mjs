@@ -635,6 +635,34 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
   }
 });
 
+test("conditional shadow coverage fills the uncovered root fraction", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  for (const shaderName of ["edge_antialias", "resolve_shadow"]) {
+    const shader = source.match(
+      new RegExp(`--\\[\\[pixelshader@${shaderName}:([\\s\\S]*?)\\]\\]`),
+    )?.[1];
+    assert.ok(shader, `${shaderName} shader was not found`);
+    const conditional = extractFunction(
+      shader, "conditional_shadow_coverage", "float");
+    const difference = extractFunction(
+      shader, "shadow_only_coverage", "float");
+    const assembly = compileConstantResult(`
+${difference}
+${conditional}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    bool correct = abs(conditional_shadow_coverage(0.5, 0.5) - 0.0) < 1e-6
+        && abs(conditional_shadow_coverage(0.8, 0.5) - 0.6) < 1e-6
+        && abs(conditional_shadow_coverage(0.4, 0.0) - 0.4) < 1e-6
+        && abs(conditional_shadow_coverage(1.0, 1.0) - 0.0) < 1e-6;
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+    assert.match(assembly,
+      /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+      `${shaderName} did not normalize the shadow into uncovered root coverage`);
+  }
+});
+
 test("ray union does not amplify repeated antialiased coverage", () => {
   const source = readFileSync(scriptPath, "utf8");
   const directShader = source.match(
@@ -704,7 +732,7 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     /--\[\[pixelshader@resolve_shadow:([\s\S]*?)\]\]/)?.[1];
   assert.ok(shader, "resolve_shadow shader was not found");
   const perSampleDifference = shader.search(
-    /shadow_only_coverage\(\s*sample_info\.a,\s*root_alpha\)/);
+    /conditional_shadow_coverage\(\s*sample_info\.a,\s*root_alpha\)/);
   const averaging = shader.indexOf("shadow_only /= 4");
   assert.ok(perSampleDifference >= 0 && averaging > perSampleDifference,
     "2x resolve averaged correlated coverages before subtraction");
@@ -732,8 +760,8 @@ test("edge refinement emits correlated difference coverage in resolved red", () 
     /float root_alpha\s*=\s*sample_source_alpha\(pixel\)/,
     "refinement did not sample root coverage at the refined subpixel");
   assert.match(shader,
-    /float shadow_only\s*=\s*shadow_only_coverage\(\s*extension_coverage,\s*root_alpha\s*\)/,
-    "refinement did not subtract correlated root coverage");
+    /float shadow_only\s*=\s*conditional_shadow_coverage\(\s*extension_coverage,\s*root_alpha\s*\)/,
+    "refinement did not normalize correlated coverage into the uncovered root");
   assert.match(shader,
     /float4 contribution\s*=\s*float4\(shadow_only \* weight,/);
 });
@@ -803,7 +831,7 @@ test("full composition keeps fractional overlap premultiplied", () => {
   const prepareShadow = extractFunction(source, "prepare_shadow_for_object");
   const cases = [
     ["0", "float4(0, 0, 0.25, 0.25)"],
-    ["0.5", "float4(0.25, 0.25, 0.53125, 0.53125)"],
+    ["0.5", "float4(0.25, 0.25, 0.5, 0.5)"],
   ];
   for (const [opacity, expected] of cases) {
     const assembly = compileConstantResult(`
@@ -825,6 +853,39 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     assert.match(assembly,
       /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
       `full composition opacity ${opacity}`);
+  }
+});
+
+test("full composition preserves absolute shadow coverage at source edges", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const colorObject = extractFunction(source, "color_object");
+  const prepareShadow = extractFunction(source, "prepare_shadow_for_object");
+  const cases = [
+    ["0", "float4(0, 0, 0.5, 0.5)"],
+    ["0.5", "float4(0.25, 0.25, 0.75, 0.75)"],
+    ["1", "float4(0.5, 0.5, 1, 1)"],
+  ];
+  for (const [opacity, expected] of cases) {
+    const assembly = compileConstantResult(`
+static const float3 object_rgb = float3(1, 1, 1);
+static const float object_mix = 0;
+static const float object_opacity = ${opacity};
+${colorObject}
+${prepareShadow}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float4 original = float4(0.5, 0.5, 0.5, 0.5);
+    // T=1 and R=0.5 produce conditional coverage C=(T-R)/(1-R)=1.
+    float4 conditional_shadow = float4(0, 0, 1, 1);
+    float4 shadow = prepare_shadow_for_object(conditional_shadow, original);
+    float4 styled = color_object(original);
+    float4 result = styled + shadow * (1 - styled.a);
+    bool correct = all(abs(result - ${expected}) < 1e-6);
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+    assert.match(assembly,
+      /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+      `source-edge shadow gap at Object Opacity ${opacity}`);
   }
 });
 
@@ -878,7 +939,7 @@ test("Object Opacity attenuates overlap with continuous source coverage", () => 
       name: "half opacity and half source",
       opacity: "0.5",
       sourceValue: "float4(0.5, 0.5, 0.5, 0.5)",
-      expected: "float4(0, 0, 0.375, 0.375)",
+      expected: "float4(0, 0, 1.0 / 3, 1.0 / 3)",
     },
     {
       name: "full opacity and sub-byte source",

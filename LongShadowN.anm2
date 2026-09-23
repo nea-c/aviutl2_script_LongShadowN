@@ -302,6 +302,13 @@ float shadow_only_coverage(float extension_coverage,
     float root_coverage) {
     return saturate(extension_coverage - saturate(root_coverage));
 }
+float conditional_shadow_coverage(float extension_coverage,
+    float root_coverage) {
+    float root = saturate(root_coverage);
+    float uncovered = 1 - root;
+    if (uncovered <= 1e-6) return 0;
+    return shadow_only_coverage(extension_coverage, root) / uncovered;
+}
 void accumulate_shadow_coverages(float sample_alpha, float distance,
     inout float total_coverage, inout float extension_coverage) {
     total_coverage = union_coverage(total_coverage, sample_alpha);
@@ -517,7 +524,7 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
                 coverage, extension_coverage);
             if (coverage >= 0.9999 && extension_coverage >= 0.9999) break;
         }
-        float shadow_only = shadow_only_coverage(
+        float shadow_only = conditional_shadow_coverage(
             extension_coverage, root_alpha);
         float weight = fade_weight_aa(first_distance);
         float weighted_coverage = coverage * weight;
@@ -712,6 +719,13 @@ float shadow_only_coverage(float extension_coverage,
     float root_coverage) {
     return saturate(extension_coverage - saturate(root_coverage));
 }
+float conditional_shadow_coverage(float extension_coverage,
+    float root_coverage) {
+    float root = saturate(root_coverage);
+    float uncovered = 1 - root;
+    if (uncovered <= 1e-6) return 0;
+    return shadow_only_coverage(extension_coverage, root) / uncovered;
+}
 float fade_weight(float distance) {
     float root = fade_in >= 0.9999 ? 1
         : smoothstep(0, max(1 - fade_in, 1e-6), distance);
@@ -733,7 +747,7 @@ float4 resolve_shadow(float4 pos : SV_Position) : SV_Target {
                 float4 sample_info = shadow_texture[work_position];
                 float2 pixel = (float2(work_position) + 0.5) / work_scale;
                 float root_alpha = sample_root_alpha(pixel);
-                shadow_only += shadow_only_coverage(
+                shadow_only += conditional_shadow_coverage(
                     sample_info.a, root_alpha);
                 shadow_info += sample_info;
             }
@@ -743,7 +757,7 @@ float4 resolve_shadow(float4 pos : SV_Position) : SV_Target {
     } else {
         shadow_info = shadow_texture[int2(pos.xy)];
         float root_alpha = sample_root_alpha(pos.xy / work_scale);
-        shadow_only = shadow_only_coverage(shadow_info.a, root_alpha);
+        shadow_only = conditional_shadow_coverage(shadow_info.a, root_alpha);
     }
     float distance = saturate(shadow_info.g / max(shadow_info.a, 1e-6));
     float weight = fade_weight(distance);
@@ -891,8 +905,11 @@ float4 color_object(float4 source) {
     return float4(rgb * alpha, alpha);
 }
 float4 prepare_shadow_for_object(float4 shadow, float4 source) {
-    float overlap_weight = 1 - source.a * (1 - object_opacity);
-    return shadow * overlap_weight;
+    float root_coverage = saturate(source.a);
+    float visible_source_alpha = root_coverage * object_opacity;
+    float source_over_weight = 1 - visible_source_alpha;
+    if (source_over_weight <= 1e-6) return 0;
+    return shadow * ((1 - root_coverage) / source_over_weight);
 }
 float4 composite_shadow(float4 pos : SV_Position) : SV_Target {
     float4 shadow = shadow_texture[int2(pos.xy)];

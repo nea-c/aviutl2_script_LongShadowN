@@ -36,12 +36,17 @@ quality, shadow direction, or curved edge.
 
 ## Selected Approach
 
-Treat the shadow-only geometry as a correlated set difference:
+Treat the shadow-only geometry as a correlated set difference, then express it
+inside the source's uncovered fraction:
 
 `D = saturate(E - R)`
 
+`C = R < 1 ? D / (1 - R) : 0`
+
 `D` is the coverage present in the extended shadow but absent from the source
-footprint. It becomes the sole coverage styled as shadow.
+footprint. `C` is the conditional shadow coverage used for filtering and
+styling. The final compositor converts `C` back to the absolute contribution
+`D`; this prevents normal source-over from attenuating `D` a second time.
 
 This produces the required boundary behavior:
 
@@ -72,12 +77,14 @@ antialiased silhouette coverage. Source-over would amplify repeated `0.5`
 samples toward one and falsely turn them into new geometry.
 
 Let `T` be the maximum coverage across all ray samples and `R` the source
-coverage at the exact distance-zero coordinate. The resolved shadow-only
-coverage is directly:
+coverage at the exact distance-zero coordinate. The absolute and stored
+conditional shadow coverages are:
 
 `D = saturate(T - R)`
 
-For 2x supersampling, `R`, `E`, and `D` are resolved independently for every
+`C = R < 1 ? D / (1 - R) : 0`
+
+For 2x supersampling, `R`, `E`, `D`, and `C` are resolved independently for every
 raw work sample before the four results are averaged. Computing the difference
 after averaging loses the nonlinear set relationship and can recreate a halo.
 
@@ -86,10 +93,10 @@ needs to be reconstructed because set difference cannot exceed fully opaque
 root coverage at that sample. The previous forced full-interior re-raymarch
 for opaque roots is therefore removed, avoiding its performance cost.
 
-Fade is applied consistently after `D` is formed. The resolved metadata
+Fade is applied consistently after `C` is formed. The resolved metadata
 contract becomes:
 
-- `r`: faded correlated shadow-only coverage `D`;
+- `r`: faded conditional shadow-only coverage `C`;
 - `g`: existing faded distance-weighted total coverage;
 - `b`: existing geometry flag;
 - `a`: faded total coverage `T`.
@@ -101,7 +108,8 @@ contract is produced, so its encoded source-coordinate behavior is unchanged.
 
 `edge_antialias` must emit the same metadata contract as `resolve_shadow`.
 Every refined subpixel accumulates positive-distance coverage `E` with `max`,
-samples its matching root coverage `R`, and stores `D = saturate(E - R)`.
+samples its matching root coverage `R`, computes `D = saturate(E - R)`, and
+stores `C = D / (1 - R)` when `R < 1`.
 
 The difference is computed per refined sample before averaging. Both the fast
 non-edge path and the refined path therefore expose identical channel meanings
@@ -114,30 +122,32 @@ changed.
 
 ## Styling and Final Compositing
 
-`style_shadow` always consumes resolved red coverage `D`. Object Opacity does
+`style_shadow` always consumes resolved red coverage `C`. Object Opacity does
 not select between extension and total coverage, because restoring total
 coverage would restore the source-shaped colored outline. Shadow color,
-texture, Shadow Opacity, Post Smooth, and Blur Shadow all operate on `D`.
+texture, Shadow Opacity, Post Smooth, and Blur Shadow all operate on `C`.
 
 Post-processing can spread styled shadow back beneath the source footprint.
-The final compositor therefore keeps the existing continuous source-overlap
-attenuation:
+The final compositor converts conditional coverage back to the source's
+uncovered fraction while compensating for the later source-over operation:
 
-`overlap_weight = 1 - source_alpha * (1 - object_opacity)`
+`visible_source_alpha = R * object_opacity`
 
-It applies that weight to premultiplied styled shadow, applies Object Mix and
-Object Opacity to the source, and performs normal premultiplied source-over.
-This final attenuation handles filter spill without changing blur semantics or
-turning the source boundary into a binary cutout.
+`prepare_weight = (1 - R) / (1 - visible_source_alpha)`
+
+The zero-denominator case returns no shadow. After normal premultiplied
+source-over, the two factors cancel to `1 - R`, so styled conditional coverage
+contributes exactly absolute coverage `D` at Object Opacity 0%, 50%, and 100%.
+This also masks filter spill continuously without a binary cutout.
 
 ## Data Flow
 
 1. `direct_raymarch_shadow` produces its existing raw packed data.
 2. `resolve_source_color` consumes the raw source-coordinate data unchanged.
-3. `resolve_shadow` obtains `R`, computes per-sample `D = saturate(T - R)`, and
-   writes the new resolved metadata contract.
-4. `edge_antialias` preserves or recomputes the same per-sample `D` contract.
-5. `style_shadow` styles only `D`, independent of Object Opacity.
+3. `resolve_shadow` obtains `R`, computes per-sample `D = saturate(T - R)` and
+   `C = D / (1 - R)`, and writes the new resolved metadata contract.
+4. `edge_antialias` preserves or recomputes the same per-sample `C` contract.
+5. `style_shadow` styles only `C`, independent of Object Opacity.
 6. Existing smoothing and blur operate on the styled shadow-only result.
 7. `composite_shadow` applies continuous overlap attenuation and normal
    premultiplied source-over.
@@ -148,16 +158,17 @@ unchanged.
 
 ## Behavior Matrix
 
-| Root `R` | Extension `E` | Shadow-only `D` | Result |
-| ---: | ---: | ---: | --- |
-| 0.5 | 0.5 | 0 | No correlated edge residue |
-| 0.5 | 0.8 | 0.3 | Preserve only protruding coverage |
-| 0 | 0.4 | 0.4 | Preserve free-standing extension |
-| 0.6 | 0.2 | 0 | Clamp non-protruding coverage |
-| 1 | any | 0 | No forced opaque-root re-raymarch |
+| Root `R` | Extension `E` | Absolute `D` | Stored `C` | Result |
+| ---: | ---: | ---: | ---: | --- |
+| 0.5 | 0.5 | 0 | 0 | No correlated edge residue |
+| 0.5 | 0.8 | 0.3 | 0.6 | Final contribution remains 0.3 |
+| 0 | 0.4 | 0.4 | 0.4 | Preserve free-standing extension |
+| 0.6 | 0.2 | 0 | 0 | Clamp non-protruding coverage |
+| 1 | any | 0 | 0 | No forced opaque-root re-raymarch |
 
-Object Opacity 0%, 50%, and 100% all use the same `D`. The parameter changes
-the source/final-overlap result, never the definition of shadow geometry.
+Object Opacity 0%, 50%, and 100% all use the same `C` and reconstruct the same
+absolute `D`. The parameter changes the source contribution, never the
+definition of shadow geometry.
 
 ## Verification
 
@@ -166,13 +177,16 @@ Automated tests will verify:
 - a constant-foldable `shadow_only_coverage(E, R)` helper produces `0` for
   `(0.5, 0.5)`, `0.3` for `(0.8, 0.5)`, `0.4` for `(0.4, 0)`, and `0` for
   `(0.2, 0.6)`;
+- `conditional_shadow_coverage(E, R)` produces `0.6` for `(0.8, 0.5)` and
+  safely produces zero for a fully covered root;
 - 2x resolution computes `D` per raw work sample before averaging, using input
   values where averaging first would produce a different result;
 - edge refinement uses the same per-sample difference contract;
 - fully opaque roots do not force an otherwise unnecessary re-raymarch;
-- `style_shadow` consumes `D` at Object Opacity 0%, 50%, and 100%;
+- `style_shadow` consumes `C` at Object Opacity 0%, 50%, and 100%;
 - no Ultra-specific distance threshold remains;
-- final overlap attenuation stays continuous for fractional source alpha;
+- final composition reconstructs the same absolute `D` at Object Opacity 0%,
+  50%, and 100%;
 - all embedded shaders compile and the full regression suite passes.
 
 Manual verification will compare Object Opacity 0%, 50%, and 100% for every

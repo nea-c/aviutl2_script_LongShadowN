@@ -1,5 +1,11 @@
 # Correlated Coverage Difference Implementation Plan
 
+> Implementation correction: resolved red now stores conditional coverage
+> `C = saturate(T - R) / (1 - R)` for `R < 1`, and final composition restores
+> the absolute difference with `(1 - R) / (1 - R * object_opacity)`. This
+> supersedes the earlier `r = D` and overlap-weight details below; see the
+> companion design document for the current contract.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Remove the colored source-outline artifact by styling only the per-sample correlated coverage difference `D = saturate(E - R)`.
