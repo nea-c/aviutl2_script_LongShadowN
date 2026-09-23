@@ -169,11 +169,11 @@ bool point_inside_bounds(float2 sample_position, float2 bounds_min, float2 bound
 }
 float next_parameter_toward(float boundary, float inside_parameter) {
     if (boundary == inside_parameter) return boundary;
-    if (boundary == 0)
-        return inside_parameter > 0 ? asfloat(0x00000001u) : asfloat(0x80000001u);
-    uint bits = asuint(boundary);
-    bool increase_bits = (boundary > 0) == (inside_parameter > boundary);
-    return asfloat(increase_bits ? bits + 1u : bits - 1u);
+    float span = inside_parameter - boundary;
+    float minimum_step = max(abs(boundary), 1) * 1e-6;
+    float step = min(abs(span), max(abs(span) / 8192, minimum_step));
+    float candidate = boundary + (span > 0 ? step : -step);
+    return candidate == boundary ? inside_parameter : candidate;
 }
 bool finish_clipped_interval(float2 origin, float2 delta,
     float2 bounds_min, float2 bounds_max,
@@ -370,11 +370,11 @@ bool point_inside_bounds(float2 sample_position, float2 bounds_min, float2 bound
 }
 float next_parameter_toward(float boundary, float inside_parameter) {
     if (boundary == inside_parameter) return boundary;
-    if (boundary == 0)
-        return inside_parameter > 0 ? asfloat(0x00000001u) : asfloat(0x80000001u);
-    uint bits = asuint(boundary);
-    bool increase_bits = (boundary > 0) == (inside_parameter > boundary);
-    return asfloat(increase_bits ? bits + 1u : bits - 1u);
+    float span = inside_parameter - boundary;
+    float minimum_step = max(abs(boundary), 1) * 1e-6;
+    float step = min(abs(span), max(abs(span) / 8192, minimum_step));
+    float candidate = boundary + (span > 0 ? step : -step);
+    return candidate == boundary ? inside_parameter : candidate;
 }
 bool finish_clipped_interval(float2 origin, float2 delta,
     float2 bounds_min, float2 bounds_max,

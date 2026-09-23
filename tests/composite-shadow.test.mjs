@@ -226,10 +226,49 @@ test("endpoint adjustment is constant time in both Direct traversals", () => {
     assert.ok(shader, `${shaderName} shader was not found`);
     const nudge = extractFunction(shader[1], "next_parameter_toward", "float");
     const finish = extractFunction(shader[1], "finish_clipped_interval", "bool");
-    assert.match(nudge, /asuint\(|asfloat\(/);
+    assert.match(nudge, /8192/);
+    assert.doesNotMatch(nudge, /asuint\(|asfloat\(/);
     assert.doesNotMatch(finish, /\bfor\s*\(/);
     assert.match(finish, /next_parameter_toward\(/);
   }
+});
+
+test("projection clipping survives large-coordinate cancellation", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@direct_raymarch_shadow:\s*([\s\S]*?)\]\]/,
+  );
+  assert.ok(shader, "direct_raymarch_shadow shader was not found");
+  const helpers = [
+    extractFunction(shader[1], "clip_parameter_axis", "bool"),
+    extractFunction(shader[1], "point_inside_bounds", "bool"),
+    extractFunction(shader[1], "next_parameter_toward", "float"),
+    extractFunction(shader[1], "finish_clipped_interval", "bool"),
+    extractFunction(shader[1], "projection_ray_interval", "bool"),
+  ].join("\n");
+  const assembly = compileConstantResult(`
+${helpers}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float start_u, end_u, source_span;
+    float2 origin = float2(1460.82177734375, 1500);
+    float2 pixel = float2(1712.49462890625, 1500);
+    float2 bounds_min = float2(1443.54833984375, 1000);
+    float2 bounds_max = float2(2097.79931640625, 2000);
+    bool hit = projection_ray_interval(pixel, origin, .25,
+        bounds_min, bounds_max, start_u, end_u, source_span);
+    float2 first = origin + (pixel - origin) * start_u;
+    float2 last = origin + (pixel - origin) * end_u;
+    bool correct = hit
+        && all(first >= bounds_min) && all(first < bounds_max)
+        && all(last >= bounds_min) && all(last < bounds_max)
+        && source_span > 0;
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+  assert.match(
+    assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+  );
 });
 
 test("Direct shader and Lua renderer share the packed source contract", () => {
