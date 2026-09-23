@@ -66,15 +66,40 @@ test("all embedded pixel shaders compile", () => {
   }
 });
 
+test("obsolete radial and Ultra renderers are removed", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  for (const name of [
+    "raymarch_shadow",
+    "inverse_raymarch_shadow",
+    "radial_step",
+    "smooth_distance",
+  ]) {
+    assert.doesNotMatch(source, new RegExp(`pixelshader@${name}:`));
+  }
+  for (const name of [
+    "render_radial_scale",
+    "render_inverse_direct",
+    "render_ultra_raymarch",
+  ]) {
+    assert.doesNotMatch(source, new RegExp(`local function ${name}`));
+  }
+  assert.match(source, /pixelshader@directional_step:/);
+  assert.match(source, /local function render_fast_directional/);
+  assert.match(source, /pixelshader@direct_raymarch_shadow:/);
+  assert.match(source, /local function render_direct_shadow/);
+});
+
 test("direct interval helpers clip directional radial and inverse rays", () => {
   const source = readFileSync(scriptPath, "utf8");
   const clipAxis = extractFunction(source, "clip_parameter_axis", "bool");
+  const pointInside = extractFunction(source, "point_inside_bounds", "bool");
   const finishInterval = extractFunction(source, "finish_clipped_interval", "bool");
   const directional = extractFunction(source, "directional_ray_interval", "bool");
   const projection = extractFunction(source, "projection_ray_interval", "bool");
   const distanceFromU = extractFunction(source, "projection_distance_from_u", "float");
   const assembly = compileConstantResult(`
 ${clipAxis}
+${pointInside}
 ${finishInterval}
 ${directional}
 ${projection}
@@ -127,288 +152,97 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
   );
 });
 
-test("inverse ray interval clips sampling to the source rectangle", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const intervalFunction = extractFunction(source, "inverse_ray_interval", "bool");
-  const assembly = compileConstantResult(`
-${intervalFunction}
-
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float start_distance, end_distance, source_span;
-    bool hit = inverse_ray_interval(
-        float2(0.5, 0), float2(0, 0), float2(-1, -1), float2(1, 1),
-        0.25, start_distance, end_distance, source_span);
-    bool clipped = hit
-        && abs(start_distance - 0) < 1e-5
-        && abs(end_distance - 0.5) < 1e-5
-        && abs(source_span - 0.5) < 1e-5;
-
-    float miss_start, miss_end, miss_span;
-    bool miss = inverse_ray_interval(
-        float2(2, 0), float2(0, 0), float2(-2, -1), float2(-1, 1),
-        0.25, miss_start, miss_end, miss_span);
-
-    float parallel_start, parallel_end, parallel_span;
-    bool parallel = inverse_ray_interval(
-        float2(0, 0.5), float2(0, 0), float2(-1, -1), float2(1, 1),
-        0.25, parallel_start, parallel_end, parallel_span);
-
-    bool correct = clipped && !miss && parallel;
-    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-}
-`);
-  assert.match(
-    assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-  );
-});
-
-test("inverse ray interval keeps both samples inside a half-open crossing", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const intervalFunction = extractFunction(source, "inverse_ray_interval", "bool");
-  const assembly = compileConstantResult(`
-${intervalFunction}
-
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float start_distance, end_distance, source_span;
-    float2 origin = float2(2.5, -1.5);
-    float2 pixel = float2(1.5, -0.5);
-    bool hit = inverse_ray_interval(pixel, origin, float2(0, 0),
-        float2(1, 1), 0.25, start_distance, end_distance, source_span);
-    float2 first = origin + (pixel - origin) / pow(0.25, start_distance);
-    float2 last = origin + (pixel - origin) / pow(0.25, end_distance);
-    bool correct = hit && all(first >= 0) && all(first < 1)
-        && all(last >= 0) && all(last < 1);
-    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-}
-`);
-  assert.match(
-    assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-  );
-});
-
-test("inverse ray interval preserves a narrow float32 crossing", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const intervalFunction = extractFunction(source, "inverse_ray_interval", "bool");
-  const assembly = compileConstantResult(`
-${intervalFunction}
-
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float start_distance, end_distance, source_span;
-    float2 origin = float2(2.5, -0.5001);
-    float2 pixel = float2(1.5, 0.4999);
-    bool hit = inverse_ray_interval(pixel, origin, float2(0, 0),
-        float2(1, 1), 0.25, start_distance, end_distance, source_span);
-    float2 first = origin + (pixel - origin) / pow(0.25, start_distance);
-    float2 last = origin + (pixel - origin) / pow(0.25, end_distance);
-    bool correct = hit && all(first >= 0) && all(first < 1)
-        && all(last >= 0) && all(last < 1);
-    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-}
-`);
-  assert.match(
-    assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-  );
-});
-
-test("inverse ray interval rejects a zero-width excluded tangent", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const intervalFunction = extractFunction(source, "inverse_ray_interval", "bool");
-  const assembly = compileConstantResult(`
-${intervalFunction}
-
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float start_distance, end_distance, source_span;
-    bool hit = inverse_ray_interval(float2(1, 1), float2(2, 0),
-        float2(0, 0), float2(1, 1), 0.25,
-        start_distance, end_distance, source_span);
-    return !hit ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-}
-`);
-  assert.match(
-    assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-  );
-});
-
-test("inverse ray interval rejects a zero-width lower-corner tangent", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const intervalFunction = extractFunction(source, "inverse_ray_interval", "bool");
-  const assembly = compileConstantResult(`
-${intervalFunction}
-
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float start_distance, end_distance, source_span;
-    bool hit = inverse_ray_interval(float2(-1, 1), float2(-2, 2),
-        float2(0, 0), float2(1, 1), 0.25,
-        start_distance, end_distance, source_span);
-    return !hit ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-}
-`);
-  assert.match(
-    assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-  );
-});
-
-test("inverse ray interval preserves a wide span after float32 correction", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const intervalFunction = extractFunction(source, "inverse_ray_interval", "bool");
-  const assembly = compileConstantResult(`
-${intervalFunction}
-
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float start_distance, end_distance, source_span;
-    float2 origin = float2(-3.7, -4);
-    float2 pixel = float2(-2.1, -2.3);
-    bool hit = inverse_ray_interval(pixel, origin, float2(0, 0),
-        float2(1, 1), 0.25, start_distance, end_distance, source_span);
-    float2 first = origin + (pixel - origin) / pow(0.25, start_distance);
-    float2 last = origin + (pixel - origin) / pow(0.25, end_distance);
-    bool correct = hit && source_span > 1.3 && source_span < 1.4
-        && all(first >= 0) && all(first < 1)
-        && all(last >= 0) && all(last < 1);
-    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-}
-`);
-  assert.match(
-    assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-  );
-});
-
-test("inverse ray interval endpoints survive distance reconstruction", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const intervalFunction = extractFunction(source, "inverse_ray_interval", "bool");
-  const assembly = compileConstantResult(`
-${intervalFunction}
-
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float start_distance, end_distance, source_span;
-    float2 origin = float2(-2.645735740661621, -3.4199843406677246);
-    float2 pixel = float2(0.4259900748729706, 0.9993191957473755);
-    bool hit = inverse_ray_interval(pixel, origin, float2(0, 0),
-        float2(1, 1), 0.25, start_distance, end_distance, source_span);
-    float2 first = origin + (pixel - origin) / pow(0.25, start_distance);
-    float2 last = origin + (pixel - origin) / pow(0.25, end_distance);
-    bool correct = hit && all(first >= 0) && all(first < 1)
-        && all(last >= 0) && all(last < 1);
-    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-}
-`);
-  assert.match(
-    assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-  );
-});
-
-test("inverse ray interval reaches the convergence endpoint", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const intervalFunction = extractFunction(source, "inverse_ray_interval", "bool");
-  const assembly = compileConstantResult(`
-${intervalFunction}
-
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float start_distance, end_distance, source_span;
-    bool hit = inverse_ray_interval(float2(0.5, 0), float2(0, 0),
-        float2(-1, -1), float2(3, 1), 0.25,
-        start_distance, end_distance, source_span);
-    bool correct = hit && end_distance == 1;
-    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-}
-`);
-  assert.match(
-    assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-  );
-});
-
-test("packed inverse shadow keeps source coordinates distance and coverage channels", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const packInverseShadow = extractFunction(source, "pack_inverse_shadow");
-  const assembly = compileConstantResult(`
-${packInverseShadow}
-
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float4 result = pack_inverse_shadow(float2(0.25, 0.75), 0.4, 0.5);
-    bool correct = all(abs(result - float4(0.25, 0.2, 0.75, 0.5)) < 1e-6);
-    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-}
-`);
-  assert.match(
-    assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-  );
-});
-
-test("inverse direct shader and Lua call share the constant and packed texture contract", () => {
+test("projection interval preserves boundary edge cases", () => {
   const source = readFileSync(scriptPath, "utf8");
   const shader = source.match(
-    /--\[\[pixelshader@inverse_raymarch_shadow:\s*([\s\S]*?)\]\]/,
+    /--\[\[pixelshader@direct_raymarch_shadow:\s*([\s\S]*?)\]\]/,
   );
-  assert.ok(shader, "inverse_raymarch_shadow shader was not found");
+  assert.ok(shader, "direct_raymarch_shadow shader was not found");
+  const helpers = [
+    extractFunction(shader[1], "clip_parameter_axis", "bool"),
+    extractFunction(shader[1], "point_inside_bounds", "bool"),
+    extractFunction(shader[1], "finish_clipped_interval", "bool"),
+    extractFunction(shader[1], "projection_ray_interval", "bool"),
+  ].join("\n");
+  const assembly = compileConstantResult(`
+${helpers}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    float ns, ne, nspan;
+    bool narrow = projection_ray_interval(
+        float2(1.5, .4999), float2(2.5, -.5001), .25,
+        float2(0, 0), float2(1, 1), ns, ne, nspan);
+    float2 narrow_first = float2(2.5, -.5001)
+        + (float2(1.5, .4999) - float2(2.5, -.5001)) * ns;
+    float2 narrow_last = float2(2.5, -.5001)
+        + (float2(1.5, .4999) - float2(2.5, -.5001)) * ne;
+
+    float ts, te, tspan;
+    bool upper_tangent = projection_ray_interval(
+        float2(1, 1), float2(2, 0), .25,
+        float2(0, 0), float2(1, 1), ts, te, tspan);
+    bool lower_tangent = projection_ray_interval(
+        float2(-1, 1), float2(-2, 2), .25,
+        float2(0, 0), float2(1, 1), ts, te, tspan);
+
+    float ws, we, wspan;
+    float2 wide_origin = float2(-3.7, -4);
+    float2 wide_pixel = float2(-2.1, -2.3);
+    bool wide = projection_ray_interval(wide_pixel, wide_origin, .25,
+        float2(0, 0), float2(1, 1), ws, we, wspan);
+    float2 wide_first = wide_origin + (wide_pixel - wide_origin) * ws;
+    float2 wide_last = wide_origin + (wide_pixel - wide_origin) * we;
+
+    float cs, ce, cspan;
+    bool convergence = projection_ray_interval(
+        float2(.5, 0), float2(0, 0), .25,
+        float2(-1, -1), float2(3, 1), cs, ce, cspan);
+
+    bool correct = narrow
+        && all(narrow_first >= 0) && all(narrow_first < 1)
+        && all(narrow_last >= 0) && all(narrow_last < 1)
+        && !upper_tangent && !lower_tangent
+        && wide && wspan > 1.3 && wspan < 1.4
+        && all(wide_first >= 0) && all(wide_first < 1)
+        && all(wide_last >= 0) && all(wide_last < 1)
+        && convergence && abs(ce - 4) < 1e-5;
+    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+}
+`);
+  assert.match(
+    assembly,
+    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
+  );
+});
+
+test("Direct shader and Lua renderer share the packed source contract", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@direct_raymarch_shadow:\s*([\s\S]*?)\]\]/,
+  );
+  assert.ok(shader, "direct_raymarch_shadow shader was not found");
   assert.match(shader[1], /Texture2D source_texture : register\(t0\)/);
-  assert.match(shader[1], /cbuffer constant0 : register\(b0\) \{\s*float2 buffer_size;\s*float2 source_offset;\s*float2 source_size;\s*float2 projection_origin;\s*float target_scale;\s*float quality_step;\s*float work_scale;\s*\};/);
+  assert.match(
+    shader[1],
+    /return float4\(first_source_coordinate\.x, first_distance \* coverage,\s*first_source_coordinate\.y, coverage\)/,
+  );
+  assert.match(
+    shader[1],
+    /source_pixel = projection_origin\s*\+ \(pixel - projection_origin\) \* parameter/,
+  );
+  assert.match(
+    shader[1],
+    /distance = projection_distance_from_u\(target_scale, parameter\)/,
+  );
 
   const renderer = source.match(
-    /local function render_inverse_direct\([\s\S]*?\r?\nend/,
+    /local function render_direct_shadow\([\s\S]*?\r?\nend/,
   );
-  assert.ok(renderer, "render_inverse_direct was not found");
-  assert.match(renderer[0], /obj\.pixelshader\("inverse_raymarch_shadow", "cache:longshadown_shadow_a",\s*"cache:longshadown_source",\s*\{ buffer_w, buffer_h, source_offset_x, source_offset_y,\s*source_w, source_h, source_pos_x, source_pos_y,\s*target_scale, quality_step, work_scale \}, "copy", "clamp"\)/);
+  assert.ok(renderer, "render_direct_shadow was not found");
+  assert.match(renderer[0], /obj\.pixelshader\("direct_raymarch_shadow"/);
   assert.match(renderer[0], /return target_scale, refine_sample_count, quality_step/);
 });
 
-test("inverse direct samples source-linear intervals within quality spacing", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const distanceToU = extractFunction(source, "inverse_u_from_distance", "float");
-  const uToDistance = extractFunction(source, "inverse_distance_from_u", "float");
-  const sampleU = extractFunction(source, "inverse_sample_u", "float");
-  const assembly = compileConstantResult(`
-${distanceToU}
-${uToDistance}
-${sampleU}
-
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float target_scale = 0.5 / length(float2(512, 512));
-    float delta_length = target_scale * 1024;
-    float start_u = inverse_sample_u(0, 1, target_scale, 0, 257);
-    float draft_previous_u = inverse_sample_u(0, 1, target_scale, 255, 257);
-    float draft_end_u = inverse_sample_u(0, 1, target_scale, 256, 257);
-    float standard_previous_u = inverse_sample_u(0, 1, target_scale, 511, 513);
-    float standard_end_u = inverse_sample_u(0, 1, target_scale, 512, 513);
-    float high_previous_u = inverse_sample_u(0, 1, target_scale, 1023, 1025);
-    float high_end_u = inverse_sample_u(0, 1, target_scale, 1024, 1025);
-    float metadata_u = 17;
-    float metadata_distance = inverse_distance_from_u(target_scale, metadata_u);
-    bool correct = abs(start_u - 1) < 1e-6
-        && abs(draft_end_u - 1 / target_scale) < 1e-3
-        && abs(standard_end_u - 1 / target_scale) < 1e-3
-        && abs(high_end_u - 1 / target_scale) < 1e-3
-        && delta_length * (draft_end_u - draft_previous_u) <= 4.0001
-        && delta_length * (standard_end_u - standard_previous_u) <= 2.0001
-        && delta_length * (high_end_u - high_previous_u) <= 1.0001
-        && abs(inverse_u_from_distance(target_scale, metadata_distance)
-            - metadata_u) < 1e-4;
-    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-}
-`);
-  assert.match(
-    assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
-  );
-
-  const shader = source.match(
-    /--\[\[pixelshader@inverse_raymarch_shadow:\s*([\s\S]*?)\]\]/,
-  );
-  assert.ok(shader, "inverse_raymarch_shadow shader was not found");
-  assert.match(shader[1], /float sample_u = inverse_sample_u\(start_distance, end_distance,\s*target_scale, sample, active_samples\)/);
-  assert.match(shader[1], /source_pixel = projection_origin\s*\+ \(pixel - projection_origin\) \* sample_u/);
-  assert.match(shader[1], /distance = inverse_distance_from_u\(target_scale, sample_u\)/);
-});
-
-test("inverse direct Lua quality spacing remains 4 2 and 1 source pixels", () => {
+test("Direct quality spacing remains 4 2 1 and 0.5 source pixels", () => {
   const source = readFileSync(scriptPath, "utf8");
   const qualityConfig = source.match(
     /local function get_quality_config\(level\)([\s\S]*?)\r?\nend/,
@@ -420,17 +254,14 @@ test("inverse direct Lua quality spacing remains 4 2 and 1 source pixels", () =>
   assert.match(qualityConfig[1], /\[3\] = \{ sample_step = 0\.5,/);
 
   const renderer = source.match(
-    /local function render_inverse_direct\([\s\S]*?\r?\nend/,
+    /local function render_direct_shadow\([\s\S]*?\r?\nend/,
   );
-  assert.ok(renderer, "render_inverse_direct was not found");
-  assert.match(renderer[0], /math\.ceil\(effective_length \* work_scale \/ quality_step\) \+ 1/);
+  assert.ok(renderer, "render_direct_shadow was not found");
+  assert.match(
+    renderer[0],
+    /math\.ceil\(effective_length \* work_scale \/ quality_step\) \+ 1/,
+  );
   assert.match(renderer[0], /math\.min\(MAX_DIRECT_SAMPLES,/);
-
-  const convergedSourceSpan = 1024 - Math.SQRT1_2;
-  const activeCounts = [4, 2, 1].map(
-    (qualityStep) => Math.ceil(convergedSourceSpan / qualityStep) + 1,
-  );
-  assert.deepEqual(activeCounts, [257, 513, 1025]);
 });
 
 test("Lua direct renderer and routing match the approved matrix", () => {
@@ -466,12 +297,14 @@ test("edge Direct helpers keep projection order endpoints and misses", () => {
   );
   assert.ok(shader, "edge_antialias shader was not found");
   const clipAxis = extractFunction(shader[1], "clip_parameter_axis", "bool");
+  const pointInside = extractFunction(shader[1], "point_inside_bounds", "bool");
   const finishInterval = extractFunction(shader[1], "finish_clipped_interval", "bool");
   const projectionInterval = extractFunction(shader[1], "projection_ray_interval", "bool");
   const distanceFromU = extractFunction(shader[1], "projection_distance_from_u", "float");
   const sampleParameter = extractFunction(shader[1], "direct_sample_parameter", "float");
   const assembly = compileConstantResult(`
 ${clipAxis}
+${pointInside}
 ${finishInterval}
 ${projectionInterval}
 ${distanceFromU}

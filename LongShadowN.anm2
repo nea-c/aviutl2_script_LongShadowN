@@ -133,233 +133,6 @@ float4 directional_step(float4 pos : SV_Position) : SV_Target {
 }
 ]]
 
---[[pixelshader@raymarch_shadow:
-Texture2D source_texture : register(t0);
-SamplerState linear_sampler : register(s0);
-cbuffer constant0 : register(b0) {
-    float2 buffer_size;
-    float2 source_offset;
-    float2 source_size;
-    float2 projection_origin;
-    float2 direction;
-    float total_length;
-    float target_scale;
-    float shadow_type;
-    float sample_count;
-    float work_scale;
-};
-float sample_source_alpha_ultra(float2 pixel) {
-    float2 local = pixel - source_offset;
-    if (any(local < 0) || any(local >= source_size)) return 0;
-    return saturate(source_texture.SampleLevel(linear_sampler,
-        local / source_size, 0).a);
-}
-float4 raymarch_shadow(float4 pos : SV_Position) : SV_Target {
-    float2 pixel = pos.xy / work_scale;
-    float active_sample_count = sample_count;
-    if (shadow_type >= 0.5) {
-        float safe_scale = max(target_scale, 1e-6);
-        float radial_speed = length(pixel - projection_origin)
-            * abs(log(safe_scale)) * max(1, 1 / safe_scale);
-        active_sample_count = min(8001,
-            max(active_sample_count, ceil(radial_speed * work_scale) + 1));
-    }
-    float coverage = 0;
-    float first_distance = 1;
-    float2 source_coordinate = 0;
-    bool found_source = false;
-    [loop]
-    for (int sample = 0; sample < 8001; ++sample) {
-        if (sample >= active_sample_count) break;
-        float distance = sample == active_sample_count - 1
-            ? 1 : sample / max(active_sample_count - 1, 1);
-        float2 source_pixel;
-        if (shadow_type < 0.5) {
-            source_pixel = pixel - direction * (distance * total_length);
-        } else {
-            float projection_scale = pow(max(target_scale, 1e-6), distance);
-            source_pixel = projection_origin
-                + (pixel - projection_origin) / projection_scale;
-        }
-        float sample_alpha = sample_source_alpha_ultra(source_pixel);
-        if (sample_alpha > 0.0001 && !found_source) {
-            first_distance = distance;
-            float2 source_local = clamp(floor(source_pixel - source_offset),
-                0, source_size - 1);
-            source_coordinate = 0.125
-                + 0.75 * (source_local + 0.5) / source_size;
-            found_source = true;
-        }
-        coverage += (1 - coverage) * sample_alpha;
-        if (coverage >= 0.9999) break;
-    }
-    return float4(source_coordinate.x, first_distance * coverage,
-        source_coordinate.y, coverage);
-}
-]]
-
---[[pixelshader@inverse_raymarch_shadow:
-Texture2D source_texture : register(t0);
-SamplerState linear_sampler : register(s0);
-cbuffer constant0 : register(b0) {
-    float2 buffer_size;
-    float2 source_offset;
-    float2 source_size;
-    float2 projection_origin;
-    float target_scale;
-    float quality_step;
-    float work_scale;
-};
-float sample_source_alpha_inverse(float2 pixel) {
-    float2 local = pixel - source_offset;
-    if (any(local < 0) || any(local >= source_size)) return 0;
-    return saturate(source_texture.SampleLevel(linear_sampler,
-        local / source_size, 0).a);
-}
-bool inverse_ray_interval(float2 pixel, float2 origin,
-    float2 bounds_min, float2 bounds_max, float target_scale,
-    out float start_distance, out float end_distance, out float source_span) {
-    start_distance = 0;
-    end_distance = 0;
-    source_span = 0;
-    float safe_scale = max(target_scale, 1e-6);
-    float maximum_u = 1 / safe_scale;
-    float minimum_u = 1;
-    float2 delta = pixel - origin;
-
-    if (abs(delta.x) < 1e-6) {
-        if (origin.x < bounds_min.x || origin.x >= bounds_max.x) return false;
-    } else {
-        float x0 = (bounds_min.x - origin.x) / delta.x;
-        float x1 = (bounds_max.x - origin.x) / delta.x;
-        minimum_u = max(minimum_u, min(x0, x1));
-        maximum_u = min(maximum_u, max(x0, x1));
-    }
-    if (abs(delta.y) < 1e-6) {
-        if (origin.y < bounds_min.y || origin.y >= bounds_max.y) return false;
-    } else {
-        float y0 = (bounds_min.y - origin.y) / delta.y;
-        float y1 = (bounds_max.y - origin.y) / delta.y;
-        minimum_u = max(minimum_u, min(y0, y1));
-        maximum_u = min(maximum_u, max(y0, y1));
-    }
-    if (maximum_u <= minimum_u) return false;
-
-    float inset_u = (maximum_u - minimum_u) * 1e-5;
-    if (any(origin + delta * minimum_u >= bounds_max)) minimum_u += inset_u;
-    if (any(origin + delta * maximum_u >= bounds_max)) maximum_u -= inset_u;
-    float logarithmic_range = max(-log(safe_scale), 1e-6);
-    start_distance = saturate(log(max(minimum_u, 1)) / logarithmic_range);
-    end_distance = saturate(log(max(maximum_u, 1)) / logarithmic_range);
-
-    float2 first_point = origin + delta / pow(safe_scale, start_distance);
-    float2 last_point = origin + delta / pow(safe_scale, end_distance);
-    bool first_outside = any(first_point < bounds_min)
-        || any(first_point >= bounds_max);
-    bool last_outside = any(last_point < bounds_min)
-        || any(last_point >= bounds_max);
-    if (first_outside || last_outside) {
-        // Check the same distance-to-source reconstruction used by the renderer.
-        if (end_distance <= start_distance) return false;
-        float midpoint_distance = start_distance
-            + (end_distance - start_distance) * 0.5;
-        float2 midpoint = origin + delta / pow(safe_scale, midpoint_distance);
-        if (any(midpoint < bounds_min) || any(midpoint >= bounds_max)) return false;
-        if (first_outside) {
-            float outside_distance = start_distance;
-            float inside_distance = midpoint_distance;
-            [unroll]
-            for (int refinement = 0; refinement < 10; ++refinement) {
-                float candidate_distance = outside_distance
-                    + (inside_distance - outside_distance) * 0.5;
-                float2 candidate = origin + delta
-                    / pow(safe_scale, candidate_distance);
-                if (any(candidate < bounds_min) || any(candidate >= bounds_max))
-                    outside_distance = candidate_distance;
-                else inside_distance = candidate_distance;
-            }
-            start_distance = inside_distance;
-        }
-        if (last_outside) {
-            float inside_distance = midpoint_distance;
-            float outside_distance = end_distance;
-            [unroll]
-            for (int refinement = 0; refinement < 10; ++refinement) {
-                float candidate_distance = inside_distance
-                    + (outside_distance - inside_distance) * 0.5;
-                float2 candidate = origin + delta
-                    / pow(safe_scale, candidate_distance);
-                if (any(candidate < bounds_min) || any(candidate >= bounds_max))
-                    outside_distance = candidate_distance;
-                else inside_distance = candidate_distance;
-            }
-            end_distance = inside_distance;
-        }
-    }
-
-    float first_u = 1 / pow(safe_scale, start_distance);
-    float last_u = 1 / pow(safe_scale, end_distance);
-    source_span = length(delta) * max(last_u - first_u, 0);
-    return end_distance >= start_distance;
-}
-float4 pack_inverse_shadow(float2 encoded_source, float first_distance,
-    float coverage) {
-    return float4(encoded_source.x, first_distance * coverage,
-        encoded_source.y, coverage);
-}
-float inverse_u_from_distance(float target_scale, float distance) {
-    return 1 / pow(max(target_scale, 1e-6), distance);
-}
-float inverse_distance_from_u(float target_scale, float u) {
-    float safe_scale = max(target_scale, 1e-6);
-    return saturate(log(max(u, 1)) / max(-log(safe_scale), 1e-6));
-}
-float inverse_sample_u(float start_distance, float end_distance,
-    float target_scale, int sample, int active_samples) {
-    float start_u = inverse_u_from_distance(target_scale, start_distance);
-    float end_u = inverse_u_from_distance(target_scale, end_distance);
-    if (sample == active_samples - 1) return end_u;
-    float progress = sample / max(active_samples - 1.0, 1.0);
-    return lerp(start_u, end_u, progress);
-}
-float4 inverse_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
-    float2 pixel = pos.xy / work_scale;
-    float start_distance, end_distance, source_span;
-    if (!inverse_ray_interval(pixel, projection_origin, source_offset,
-            source_offset + source_size, target_scale,
-            start_distance, end_distance, source_span)) return 0;
-
-    int active_samples = min(8001,
-        max(2, (int)ceil(source_span * work_scale / quality_step) + 1));
-    float coverage = 0;
-    float first_distance = 1;
-    float2 first_source_coordinate = 0;
-    bool found_source = false;
-
-    [loop]
-    for (int sample = 0; sample < 8001; ++sample) {
-        if (sample >= active_samples) break;
-        float sample_u = inverse_sample_u(start_distance, end_distance,
-            target_scale, sample, active_samples);
-        float2 source_pixel = projection_origin
-            + (pixel - projection_origin) * sample_u;
-        float distance = inverse_distance_from_u(target_scale, sample_u);
-        float sample_alpha = sample_source_alpha_inverse(source_pixel);
-        if (sample_alpha > 0.0001 && !found_source) {
-            found_source = true;
-            first_distance = distance;
-            float2 source_local = clamp(floor(source_pixel - source_offset),
-                0, source_size - 1);
-            first_source_coordinate = 0.125
-                + 0.75 * (source_local + 0.5) / source_size;
-        }
-        coverage += (1 - coverage) * sample_alpha;
-        if (coverage >= 0.9999) break;
-    }
-    return pack_inverse_shadow(first_source_coordinate, first_distance, coverage);
-}
-]]
-
 --[[pixelshader@direct_raymarch_shadow:
 Texture2D source_texture : register(t0);
 SamplerState linear_sampler : register(s0);
@@ -389,22 +162,49 @@ bool clip_parameter_axis(float origin, float delta, float bounds_min,
     float last = (bounds_max - origin) / delta;
     interval_min = max(interval_min, min(first, last));
     interval_max = min(interval_max, max(first, last));
-    return interval_max >= interval_min;
+    return interval_max > interval_min;
+}
+bool point_inside_bounds(float2 sample_position, float2 bounds_min, float2 bounds_max) {
+    return all(sample_position >= bounds_min) && all(sample_position < bounds_max);
 }
 bool finish_clipped_interval(float2 origin, float2 delta,
     float2 bounds_min, float2 bounds_max,
     inout float interval_min, inout float interval_max) {
-    if (interval_max < interval_min) return false;
-    float inset = (interval_max - interval_min) * 1e-5;
-    if (any(origin + delta * interval_min >= bounds_max))
-        interval_min += inset;
-    if (any(origin + delta * interval_max >= bounds_max))
-        interval_max -= inset;
-    float2 first = origin + delta * interval_min;
-    float2 last = origin + delta * interval_max;
-    return interval_max >= interval_min
-        && all(first >= bounds_min) && all(first < bounds_max)
-        && all(last >= bounds_min) && all(last < bounds_max);
+    if (interval_max <= interval_min) return false;
+    float midpoint = (interval_min + interval_max) * 0.5;
+    if (!point_inside_bounds(origin + delta * midpoint,
+            bounds_min, bounds_max)) return false;
+    if (!point_inside_bounds(origin + delta * interval_min,
+            bounds_min, bounds_max)) {
+        float outside_parameter = interval_min;
+        float inside_parameter = midpoint;
+        [unroll]
+        for (int refinement = 0; refinement < 16; ++refinement) {
+            float candidate = (outside_parameter + inside_parameter) * 0.5;
+            if (point_inside_bounds(origin + delta * candidate,
+                    bounds_min, bounds_max)) inside_parameter = candidate;
+            else outside_parameter = candidate;
+        }
+        interval_min = inside_parameter;
+    }
+    if (!point_inside_bounds(origin + delta * interval_max,
+            bounds_min, bounds_max)) {
+        float inside_parameter = midpoint;
+        float outside_parameter = interval_max;
+        [unroll]
+        for (int refinement = 0; refinement < 16; ++refinement) {
+            float candidate = (inside_parameter + outside_parameter) * 0.5;
+            if (point_inside_bounds(origin + delta * candidate,
+                    bounds_min, bounds_max)) inside_parameter = candidate;
+            else outside_parameter = candidate;
+        }
+        interval_max = inside_parameter;
+    }
+    return interval_max > interval_min
+        && point_inside_bounds(origin + delta * interval_min,
+            bounds_min, bounds_max)
+        && point_inside_bounds(origin + delta * interval_max,
+            bounds_min, bounds_max);
 }
 bool directional_ray_interval(float2 pixel, float2 ray_direction,
     float ray_length, float2 bounds_min, float2 bounds_max,
@@ -573,22 +373,49 @@ bool clip_parameter_axis(float origin, float delta, float bounds_min,
     float last = (bounds_max - origin) / delta;
     interval_min = max(interval_min, min(first, last));
     interval_max = min(interval_max, max(first, last));
-    return interval_max >= interval_min;
+    return interval_max > interval_min;
+}
+bool point_inside_bounds(float2 sample_position, float2 bounds_min, float2 bounds_max) {
+    return all(sample_position >= bounds_min) && all(sample_position < bounds_max);
 }
 bool finish_clipped_interval(float2 origin, float2 delta,
     float2 bounds_min, float2 bounds_max,
     inout float interval_min, inout float interval_max) {
-    if (interval_max < interval_min) return false;
-    float inset = (interval_max - interval_min) * 1e-5;
-    if (any(origin + delta * interval_min >= bounds_max))
-        interval_min += inset;
-    if (any(origin + delta * interval_max >= bounds_max))
-        interval_max -= inset;
-    float2 first = origin + delta * interval_min;
-    float2 last = origin + delta * interval_max;
-    return interval_max >= interval_min
-        && all(first >= bounds_min) && all(first < bounds_max)
-        && all(last >= bounds_min) && all(last < bounds_max);
+    if (interval_max <= interval_min) return false;
+    float midpoint = (interval_min + interval_max) * 0.5;
+    if (!point_inside_bounds(origin + delta * midpoint,
+            bounds_min, bounds_max)) return false;
+    if (!point_inside_bounds(origin + delta * interval_min,
+            bounds_min, bounds_max)) {
+        float outside_parameter = interval_min;
+        float inside_parameter = midpoint;
+        [unroll]
+        for (int refinement = 0; refinement < 16; ++refinement) {
+            float candidate = (outside_parameter + inside_parameter) * 0.5;
+            if (point_inside_bounds(origin + delta * candidate,
+                    bounds_min, bounds_max)) inside_parameter = candidate;
+            else outside_parameter = candidate;
+        }
+        interval_min = inside_parameter;
+    }
+    if (!point_inside_bounds(origin + delta * interval_max,
+            bounds_min, bounds_max)) {
+        float inside_parameter = midpoint;
+        float outside_parameter = interval_max;
+        [unroll]
+        for (int refinement = 0; refinement < 16; ++refinement) {
+            float candidate = (inside_parameter + outside_parameter) * 0.5;
+            if (point_inside_bounds(origin + delta * candidate,
+                    bounds_min, bounds_max)) inside_parameter = candidate;
+            else outside_parameter = candidate;
+        }
+        interval_max = inside_parameter;
+    }
+    return interval_max > interval_min
+        && point_inside_bounds(origin + delta * interval_min,
+            bounds_min, bounds_max)
+        && point_inside_bounds(origin + delta * interval_max,
+            bounds_min, bounds_max);
 }
 bool directional_ray_interval(float2 pixel, float2 ray_direction,
     float ray_length, float2 bounds_min, float2 bounds_max,
@@ -754,76 +581,6 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
         refined += contribution;
     }
     return refined / refine_samples;
-}
-]]
-
---[[pixelshader@radial_step:
-Texture2D shadow_texture : register(t0);
-SamplerState linear_sampler : register(s0);
-cbuffer constant0 : register(b0) {
-    float2 buffer_size;
-    float2 source_position;
-    float step_scale;
-    float step_progress;
-    float final_linear;
-};
-float4 radial_step(float4 pos : SV_Position) : SV_Target {
-    float2 pixel = pos.xy;
-    float4 current = shadow_texture[int2(pixel)];
-    float2 sample_pixel = source_position + (pixel - source_position) / step_scale;
-    float4 shifted = 0;
-    float4 shifted_point = 0;
-    if (all(sample_pixel >= 0) && all(sample_pixel < buffer_size)) {
-        shifted_point = shadow_texture[int2(sample_pixel)];
-        shifted = final_linear >= 0.5
-            ? shadow_texture.SampleLevel(linear_sampler, sample_pixel / buffer_size, 0)
-            : shifted_point;
-    }
-    float shifted_distance = shifted.a > 0
-        ? saturate(shifted.g / shifted.a + step_progress) : 0;
-    float coverage = current.a + (1 - current.a) * shifted.a;
-    float distance = current.a > 0 ? current.g / current.a : shifted_distance;
-    bool current_found = current.r > 0.01 && current.b > 0.01;
-    float source_x = current_found ? current.r : shifted_point.r;
-    float source_y = current_found ? current.b : shifted_point.b;
-    distance = coverage > 0 ? saturate(distance) : 1;
-    return float4(source_x, distance * coverage, source_y, coverage);
-}
-]]
-
---[[pixelshader@smooth_distance:
-Texture2D shadow_texture : register(t0);
-cbuffer constant0 : register(b0) {
-    float2 buffer_size;
-};
-float4 smooth_distance(float4 pos : SV_Position) : SV_Target {
-    int2 center_position = int2(pos.xy);
-    float4 center = shadow_texture[center_position];
-    if (center.b <= 0.0001 || center.a <= 0.0001) return center;
-
-    // Radial construction quantizes the first-hit distance even when its
-    // geometry is already smooth. Fade makes those distance steps visible as
-    // contour bands, so filter only premultiplied distance metadata. Keeping
-    // the center R/B/A intact prevents this pass from expanding or blurring
-    // the actual shadow silhouette.
-    float distance_sum = 0;
-    float coverage_sum = 0;
-    int2 maximum_position = int2(buffer_size) - 1;
-    [unroll]
-    for (int y = -1; y <= 1; ++y) {
-        [unroll]
-        for (int x = -1; x <= 1; ++x) {
-            int2 sample_position = clamp(center_position + int2(x, y),
-                int2(0, 0), maximum_position);
-            float4 sample = shadow_texture[sample_position];
-            if (sample.b > 0.0001 && sample.a > 0.0001) {
-                distance_sum += sample.g;
-                coverage_sum += sample.a;
-            }
-        }
-    }
-    float distance = saturate(distance_sum / max(coverage_sum, 1e-6));
-    return float4(center.r, distance * center.a, center.b, center.a);
 }
 ]]
 
@@ -1455,65 +1212,6 @@ local function render_fast_directional(buffer_w, buffer_h, offset_x, offset_y, w
         math.max(2, math.ceil(shadow_length * work_scale / direct_step) + 1))
 end
 
-local function render_radial_scale(buffer_w, buffer_h, source_pos_x, source_pos_y, work_scale)
-    local target_scale, effective_length = get_radial_projection(shadow_type, shadow_length,
-        source_w, source_h)
-    local quality_step = get_quality_config(effective_quality)
-    local work_source_x, work_source_y = source_pos_x * work_scale, source_pos_y * work_scale
-    local requested_intervals = math.min(MAX_SAMPLES - 1,
-        math.max(1, math.ceil(effective_length * work_scale / quality_step)))
-    local sample_count = 2
-    while sample_count < requested_intervals + 1 do sample_count = sample_count * 2 end
-    sample_count = math.min(MAX_SAMPLES, sample_count)
-    local base_scale = target_scale ^ (1 / (sample_count - 1))
-
-    obj.clearbuffer("cache:longshadown_shadow_a", buffer_w, buffer_h)
-    obj.clearbuffer("cache:longshadown_shadow_b", buffer_w, buffer_h)
-    obj.pixelshader("seed_shadow", "cache:longshadown_shadow_a", "cache:longshadown_source",
-        { source_offset_x, source_offset_y, source_w, source_h, work_scale }, "copy", "clamp")
-    local covered, read_a = 1, true
-    while covered < sample_count do
-        local src = read_a and "cache:longshadown_shadow_a" or "cache:longshadown_shadow_b"
-        local dst = read_a and "cache:longshadown_shadow_b" or "cache:longshadown_shadow_a"
-        local step_scale = base_scale ^ covered
-        local step_progress = covered / (sample_count - 1)
-        local final_linear = covered * 2 >= sample_count and 1 or 0
-        obj.pixelshader("radial_step", dst, src,
-            { buffer_w, buffer_h, work_source_x, work_source_y,
-              step_scale, step_progress, final_linear }, "copy", "clip")
-        covered = covered * 2
-        read_a = not read_a
-    end
-    if not read_a then
-        obj.copybuffer("cache:longshadown_shadow_a", "cache:longshadown_shadow_b")
-    end
-    -- Fade and 1D textures expose the discrete first-hit distances produced by
-    -- the logarithmic scale passes. Smooth that metadata only; the shader
-    -- deliberately preserves the center geometry and coverage channels.
-    obj.pixelshader("smooth_distance", "cache:longshadown_shadow_b", "cache:longshadown_shadow_a",
-        { buffer_w, buffer_h }, "copy", "clamp")
-    obj.copybuffer("cache:longshadown_shadow_a", "cache:longshadown_shadow_b")
-    local refine_intervals = math.min(MAX_DIRECT_SAMPLES - 1,
-        math.max(1, math.ceil(effective_length * work_scale / quality_step)))
-    return target_scale, refine_intervals + 1
-end
-
-local function render_inverse_direct(buffer_w, buffer_h,
-    source_pos_x, source_pos_y, work_scale)
-    local target_scale, effective_length = get_radial_projection(
-        shadow_type, shadow_length, source_w, source_h)
-    local quality_step = get_quality_config(effective_quality)
-    local refine_sample_count = math.min(MAX_DIRECT_SAMPLES,
-        math.max(2, math.ceil(effective_length * work_scale / quality_step) + 1))
-    obj.clearbuffer("cache:longshadown_shadow_a", buffer_w, buffer_h)
-    obj.pixelshader("inverse_raymarch_shadow", "cache:longshadown_shadow_a",
-        "cache:longshadown_source",
-        { buffer_w, buffer_h, source_offset_x, source_offset_y,
-          source_w, source_h, source_pos_x, source_pos_y,
-          target_scale, quality_step, work_scale }, "copy", "clamp")
-    return target_scale, refine_sample_count, quality_step
-end
-
 local function render_direct_shadow(buffer_w, buffer_h,
     source_pos_x, source_pos_y, work_scale)
     local target_scale, effective_length = 1, shadow_length
@@ -1533,24 +1231,6 @@ local function render_direct_shadow(buffer_w, buffer_h,
           shadow_length, target_scale, shadow_type, quality_step, work_scale },
         "copy", "clamp")
     return target_scale, refine_sample_count, quality_step
-end
-
-local function render_ultra_raymarch(buffer_w, buffer_h, source_pos_x, source_pos_y, work_scale)
-    local target_scale, effective_length = 1, shadow_length
-    if shadow_type >= 1 then
-        target_scale, effective_length = get_radial_projection(
-            shadow_type, shadow_length, source_w, source_h)
-    end
-    local sample_count = math.min(MAX_DIRECT_SAMPLES,
-        math.max(2, math.ceil(effective_length * work_scale) + 1))
-    obj.clearbuffer("cache:longshadown_shadow_a", buffer_w, buffer_h)
-    obj.pixelshader("raymarch_shadow", "cache:longshadown_shadow_a",
-        "cache:longshadown_source",
-        { buffer_w, buffer_h, source_offset_x, source_offset_y, source_w, source_h,
-          source_pos_x, source_pos_y, math.cos(math.rad(angle)), math.sin(math.rad(angle)),
-          shadow_length, target_scale, shadow_type, sample_count, work_scale },
-        "copy", "clamp")
-    return target_scale, sample_count
 end
 
 local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
