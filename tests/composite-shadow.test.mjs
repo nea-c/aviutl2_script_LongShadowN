@@ -417,6 +417,7 @@ test("inverse direct Lua quality spacing remains 4 2 and 1 source pixels", () =>
   assert.match(qualityConfig[1], /\[0\] = \{ sample_step = 4\.0,/);
   assert.match(qualityConfig[1], /\[1\] = \{ sample_step = 2\.0,/);
   assert.match(qualityConfig[1], /\[2\] = \{ sample_step = 1\.0,/);
+  assert.match(qualityConfig[1], /\[3\] = \{ sample_step = 0\.5,/);
 
   const renderer = source.match(
     /local function render_inverse_direct\([\s\S]*?\r?\nend/,
@@ -430,6 +431,32 @@ test("inverse direct Lua quality spacing remains 4 2 and 1 source pixels", () =>
     (qualityStep) => Math.ceil(convergedSourceSpan / qualityStep) + 1,
   );
   assert.deepEqual(activeCounts, [257, 513, 1025]);
+});
+
+test("Lua direct renderer and routing match the approved matrix", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const renderer = source.match(
+    /local function render_direct_shadow\([\s\S]*?\r?\nend/,
+  );
+  assert.ok(renderer, "render_direct_shadow was not found");
+  assert.match(renderer[0], /local target_scale, effective_length = 1, shadow_length/);
+  assert.match(renderer[0], /if shadow_type >= 1 then[\s\S]*?get_radial_projection/);
+  assert.match(renderer[0], /obj\.pixelshader\("direct_raymarch_shadow"/);
+  assert.match(renderer[0], /return target_scale, refine_sample_count, quality_step/);
+
+  const dispatch = source.match(
+    /if should_render_shadow then[\s\S]*?\r?\nelse/,
+  );
+  assert.ok(dispatch, "shadow renderer dispatch was not found");
+  assert.match(
+    dispatch[0],
+    /if shadow_type == 0 and effective_quality < 2 then[\s\S]*?render_fast_directional/,
+  );
+  assert.match(dispatch[0], /else[\s\S]*?render_direct_shadow/);
+  assert.doesNotMatch(
+    dispatch[0],
+    /render_ultra_raymarch|render_radial_scale|render_inverse_direct/,
+  );
 });
 
 test("clipped inverse refinement keeps endpoints misses and source-space quality spacing", () => {
@@ -518,7 +545,7 @@ test("clipped inverse refinement preserves directional radial and Lua contracts"
   assert.match(styleFunction[0], /fade_in \/ 100, fade_out \/ 100, effective_quality >= 2 and 1 or 0,\s*inverse_quality_step, work_scale \}, "copy", "clamp"\)/);
 });
 
-test("inverse refinement sentinel keeps Ultra on the legacy edge path", () => {
+test("direct routing forwards quality spacing to the current edge pipeline", () => {
   const source = readFileSync(scriptPath, "utf8");
   const shader = source.match(
     /--\[\[pixelshader@edge_antialias:\s*([\s\S]*?)\]\]/,
@@ -542,20 +569,9 @@ test("inverse refinement sentinel keeps Ultra on the legacy edge path", () => {
     /if should_render_shadow then[\s\S]*?\r?\nelse/,
   );
   assert.ok(dispatch, "shadow renderer dispatch was not found");
-  assert.match(dispatch[0], /local inverse_quality_step\s*\r?\n/);
-  assert.doesNotMatch(dispatch[0], /local inverse_quality_step = 1/);
-  assert.match(dispatch[0], /target_scale, refine_sample_count, inverse_quality_step = render_inverse_direct/);
-});
-
-test("inverse direct dispatch keeps Ultra Directional and Radial paths unchanged", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const dispatch = source.match(
-    /if effective_quality == 3 then[\s\S]*?\r?\n    end\r?\n    style_and_filter_shadow\([\s\S]*?inverse_quality_step\)/,
-  );
-  assert.ok(dispatch, "shadow renderer dispatch was not found");
-  assert.match(dispatch[0], /if effective_quality == 3 then[\s\S]*?render_ultra_raymarch\([\s\S]*?elseif shadow_type == 0 then[\s\S]*?render_fast_directional\([\s\S]*?elseif shadow_type == 1 then[\s\S]*?render_radial_scale\([\s\S]*?elseif shadow_type == 2 then[\s\S]*?render_inverse_direct\(/);
-  assert.match(dispatch[0], /target_scale, refine_sample_count, inverse_quality_step = render_inverse_direct/);
-  assert.match(dispatch[0], /style_and_filter_shadow\([\s\S]*?refine_samples, inverse_quality_step\)/);
+  assert.match(dispatch[0], /local direct_quality_step\s*\r?\n/);
+  assert.match(dispatch[0], /target_scale, refine_sample_count, direct_quality_step = render_direct_shadow/);
+  assert.match(dispatch[0], /style_and_filter_shadow\([\s\S]*?refine_samples, direct_quality_step\)/);
 });
 
 test("fade controls expose percent values while shaders receive normalized values", () => {

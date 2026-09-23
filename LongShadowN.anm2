@@ -1527,6 +1527,27 @@ local function render_inverse_direct(buffer_w, buffer_h,
     return target_scale, refine_sample_count, quality_step
 end
 
+local function render_direct_shadow(buffer_w, buffer_h,
+    source_pos_x, source_pos_y, work_scale)
+    local target_scale, effective_length = 1, shadow_length
+    if shadow_type >= 1 then
+        target_scale, effective_length = get_radial_projection(
+            shadow_type, shadow_length, source_w, source_h)
+    end
+    local quality_step = get_quality_config(effective_quality)
+    local refine_sample_count = math.min(MAX_DIRECT_SAMPLES,
+        math.max(2, math.ceil(effective_length * work_scale / quality_step) + 1))
+    obj.clearbuffer("cache:longshadown_shadow_a", buffer_w, buffer_h)
+    obj.pixelshader("direct_raymarch_shadow", "cache:longshadown_shadow_a",
+        "cache:longshadown_source",
+        { buffer_w, buffer_h, source_offset_x, source_offset_y,
+          source_w, source_h, source_pos_x, source_pos_y,
+          math.cos(math.rad(angle)), math.sin(math.rad(angle)),
+          shadow_length, target_scale, shadow_type, quality_step, work_scale },
+        "copy", "clamp")
+    return target_scale, refine_sample_count, quality_step
+end
+
 local function render_ultra_raymarch(buffer_w, buffer_h, source_pos_x, source_pos_y, work_scale)
     local target_scale, effective_length = 1, shadow_length
     if shadow_type >= 1 then
@@ -1636,23 +1657,17 @@ local work_w, work_h = obj.w * work_scale, obj.h * work_scale
 if should_render_shadow then
     local target_scale = 1
     local refine_sample_count
-    local inverse_quality_step
+    local direct_quality_step
     local _, refine_samples = get_quality_config(effective_quality)
-    if effective_quality == 3 then
-        target_scale, refine_sample_count = render_ultra_raymarch(
-            work_w, work_h, source_pos_x, source_pos_y, work_scale)
-    elseif shadow_type == 0 then
+    if shadow_type == 0 and effective_quality < 2 then
         refine_sample_count = render_fast_directional(
             work_w, work_h, source_offset_x, source_offset_y, work_scale)
-    elseif shadow_type == 1 then
-        target_scale, refine_sample_count = render_radial_scale(
-            work_w, work_h, source_pos_x, source_pos_y, work_scale)
-    elseif shadow_type == 2 then
-        target_scale, refine_sample_count, inverse_quality_step = render_inverse_direct(
+    else
+        target_scale, refine_sample_count, direct_quality_step = render_direct_shadow(
             work_w, work_h, source_pos_x, source_pos_y, work_scale)
     end
     style_and_filter_shadow(obj.w, obj.h, work_scale,
-        target_scale, refine_sample_count, refine_samples, inverse_quality_step)
+        target_scale, refine_sample_count, refine_samples, direct_quality_step)
 else
     -- Both caches are current-frame transparency, never previous-frame results.
     obj.clearbuffer("cache:longshadown_shadow_a", obj.w, obj.h)
