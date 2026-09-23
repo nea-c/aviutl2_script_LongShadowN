@@ -459,56 +459,42 @@ test("Lua direct renderer and routing match the approved matrix", () => {
   );
 });
 
-test("clipped inverse refinement keeps endpoints misses and source-space quality spacing", () => {
+test("edge Direct helpers keep projection order endpoints and misses", () => {
   const source = readFileSync(scriptPath, "utf8");
   const shader = source.match(
     /--\[\[pixelshader@edge_antialias:\s*([\s\S]*?)\]\]/,
   );
   assert.ok(shader, "edge_antialias shader was not found");
-  const intervalFunction = extractFunction(shader[1], "inverse_ray_interval", "bool");
-  const distanceToU = extractFunction(shader[1], "inverse_u_from_distance", "float");
-  const uToDistance = extractFunction(shader[1], "inverse_distance_from_u", "float");
-  const sampleU = extractFunction(shader[1], "inverse_sample_u", "float");
+  const clipAxis = extractFunction(shader[1], "clip_parameter_axis", "bool");
+  const finishInterval = extractFunction(shader[1], "finish_clipped_interval", "bool");
+  const projectionInterval = extractFunction(shader[1], "projection_ray_interval", "bool");
+  const distanceFromU = extractFunction(shader[1], "projection_distance_from_u", "float");
+  const sampleParameter = extractFunction(shader[1], "direct_sample_parameter", "float");
   const assembly = compileConstantResult(`
-${intervalFunction}
-${distanceToU}
-${uToDistance}
-${sampleU}
+${clipAxis}
+${finishInterval}
+${projectionInterval}
+${distanceFromU}
+${sampleParameter}
 
 float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float start_distance, end_distance, source_span;
-    bool hit = inverse_ray_interval(
-        float2(0.5, 0), float2(0, 0), float2(-1, -1), float2(1, 1),
-        0.25, start_distance, end_distance, source_span);
-    float2 first = float2(0, 0)
-        + float2(0.5, 0) / pow(0.25, start_distance);
-    float2 last = float2(0, 0)
-        + float2(0.5, 0) / pow(0.25, end_distance);
-
+    float start_u, end_u, source_span;
+    bool hit = projection_ray_interval(float2(.5, 0), float2(0, 0), .25,
+        float2(-1, -1), float2(1, 1), start_u, end_u, source_span);
     float miss_start, miss_end, miss_span;
-    bool miss = inverse_ray_interval(
-        float2(2, 0), float2(0, 0), float2(-2, -1), float2(-1, 1),
-        0.25, miss_start, miss_end, miss_span);
-
-    float target_scale = 0.5 / length(float2(512, 512));
-    float delta_length = target_scale * 1024;
-    float draft_previous_u = inverse_sample_u(0, 1, target_scale, 255, 257);
-    float draft_end_u = inverse_sample_u(0, 1, target_scale, 256, 257);
-    float standard_previous_u = inverse_sample_u(0, 1, target_scale, 511, 513);
-    float standard_end_u = inverse_sample_u(0, 1, target_scale, 512, 513);
-    float high_previous_u = inverse_sample_u(0, 1, target_scale, 1023, 1025);
-    float high_end_u = inverse_sample_u(0, 1, target_scale, 1024, 1025);
-    float metadata_distance = inverse_distance_from_u(target_scale, 17);
-
+    bool miss = projection_ray_interval(float2(2, 0), float2(0, 0), .25,
+        float2(-2, -1), float2(-1, 1), miss_start, miss_end, miss_span);
+    float radial_start, radial_end, radial_span;
+    bool radial = projection_ray_interval(float2(.5, 0), float2(0, 0), 2,
+        float2(.3, -1), float2(.4, 1),
+        radial_start, radial_end, radial_span);
+    float exact_end = direct_sample_parameter(start_u, end_u, 8000, 8001);
     bool correct = hit && !miss
-        && abs(start_distance) < 1e-5
-        && abs(end_distance - 0.5) < 1e-5
-        && all(first >= -1) && all(first < 1)
-        && all(last >= -1) && all(last < 1)
-        && delta_length * (draft_end_u - draft_previous_u) <= 4.0001
-        && delta_length * (standard_end_u - standard_previous_u) <= 2.0001
-        && delta_length * (high_end_u - high_previous_u) <= 1.0001
-        && abs(inverse_u_from_distance(target_scale, metadata_distance) - 17) < 1e-4;
+        && start_u < end_u && abs(source_span - .5) < 1e-3
+        && radial && radial_start > radial_end && abs(radial_span - .1) < 1e-3
+        && exact_end == end_u
+        && projection_distance_from_u(.25, start_u)
+            < projection_distance_from_u(.25, end_u);
     return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
 }
 `);
@@ -517,61 +503,44 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
   );
 
-  assert.match(shader[1], /shadow_type >= 1\.5 && inverse_quality_step > 0[\s\S]*?inverse_ray_interval/);
+});
+
+test("edge refinement mirrors generalized Direct traversal", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@edge_antialias:\s*([\s\S]*?)\]\]/,
+  );
+  assert.ok(shader, "edge_antialias shader was not found");
+  assert.match(shader[1], /float direct_quality_step;/);
+  assert.match(shader[1], /bool directional_ray_interval\(/);
+  assert.match(shader[1], /bool projection_ray_interval\(/);
+  assert.match(shader[1], /if \(direct_quality_step > 0\)/);
   assert.match(
     shader[1],
-    /ceil\(source_span \* work_scale \/ inverse_quality_step\) \+ 1/,
+    /ceil\(source_span \* work_scale\s*\/ direct_quality_step\) \+ 1/,
   );
-  assert.match(shader[1], /float sample_u = inverse_sample_u\(start_distance, end_distance,\s*target_scale, sample, active_samples\)/);
-  assert.match(shader[1], /source_pixel = projection_origin\s*\+ \(pixel - projection_origin\) \* sample_u/);
-  assert.match(shader[1], /distance = inverse_distance_from_u\(target_scale, sample_u\)/);
-});
-
-test("clipped inverse refinement preserves directional radial and Lua contracts", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const shader = source.match(
-    /--\[\[pixelshader@edge_antialias:\s*([\s\S]*?)\]\]/,
+  assert.match(
+    shader[1],
+    /direct_sample_parameter\(\s*start_parameter, end_parameter,/,
   );
-  assert.ok(shader, "edge_antialias shader was not found");
-  assert.match(shader[1], /float dense_refine;\s*float inverse_quality_step;\s*float work_scale;/);
-  assert.match(shader[1], /if \(shadow_type < 0\.5\) \{\s*source_pixel = pixel\s*- direction \* \(distance \* total_length\);\s*\} else \{/);
-  assert.match(shader[1], /float projection_scale = pow\(max\(target_scale, 1e-6\), distance\);\s*source_pixel = projection_origin\s*\+ \(pixel - projection_origin\) \/ projection_scale;/);
+  assert.doesNotMatch(
+    shader[1],
+    /inverse_quality_step|inverse_ray_interval|inverse_sample_u/,
+  );
 
-  const styleFunction = source.match(
+  const style = source.match(
     /local function style_and_filter_shadow\([\s\S]*?\r?\nend/,
   );
-  assert.ok(styleFunction, "style_and_filter_shadow was not found");
-  assert.match(styleFunction[0], /target_scale, refine_sample_count, refine_samples, inverse_quality_step\)/);
-  assert.match(styleFunction[0], /fade_in \/ 100, fade_out \/ 100, effective_quality >= 2 and 1 or 0,\s*inverse_quality_step, work_scale \}, "copy", "clamp"\)/);
-});
-
-test("direct routing forwards quality spacing to the current edge pipeline", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const shader = source.match(
-    /--\[\[pixelshader@edge_antialias:\s*([\s\S]*?)\]\]/,
+  assert.ok(style, "style_and_filter_shadow was not found");
+  assert.match(
+    style[0],
+    /target_scale, refine_sample_count, refine_samples, direct_quality_step\)/,
   );
-  assert.ok(shader, "edge_antialias shader was not found");
-  const edgeBody = extractFunction(shader[1], "edge_antialias");
-  const directConditions = edgeBody.match(
-    /shadow_type >= 1\.5 && inverse_quality_step > 0/g,
-  ) ?? [];
-  assert.equal(directConditions.length, 2);
-  assert.match(edgeBody, /if \(shadow_type >= 1\.5 && inverse_quality_step > 0\) \{[\s\S]*?inverse_ray_interval/);
-  assert.match(edgeBody, /\} else \{\s*if \(sample >= active_sample_count\) break;[\s\S]*?if \(shadow_type < 0\.5\) \{\s*source_pixel = pixel\s*- direction \* \(distance \* total_length\);\s*\} else \{\s*float projection_scale = pow\(max\(target_scale, 1e-6\), distance\);\s*source_pixel = projection_origin\s*\+ \(pixel - projection_origin\) \/ projection_scale;/);
-
-  const styleFunction = source.match(
-    /local function style_and_filter_shadow\([\s\S]*?\r?\nend/,
+  assert.match(style[0], /direct_quality_step = direct_quality_step or 0/);
+  assert.match(
+    style[0],
+    /fade_in \/ 100, fade_out \/ 100[\s\S]*?direct_quality_step, work_scale/,
   );
-  assert.ok(styleFunction, "style_and_filter_shadow was not found");
-  assert.match(styleFunction[0], /inverse_quality_step = inverse_quality_step or 0/);
-
-  const dispatch = source.match(
-    /if should_render_shadow then[\s\S]*?\r?\nelse/,
-  );
-  assert.ok(dispatch, "shadow renderer dispatch was not found");
-  assert.match(dispatch[0], /local direct_quality_step\s*\r?\n/);
-  assert.match(dispatch[0], /target_scale, refine_sample_count, direct_quality_step = render_direct_shadow/);
-  assert.match(dispatch[0], /style_and_filter_shadow\([\s\S]*?refine_samples, direct_quality_step\)/);
 });
 
 test("fade controls expose percent values while shaders receive normalized values", () => {
