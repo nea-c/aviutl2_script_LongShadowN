@@ -181,7 +181,7 @@ bool inverse_ray_interval(float2 pixel, float2 origin,
         minimum_u = max(minimum_u, min(y0, y1));
         maximum_u = min(maximum_u, max(y0, y1));
     }
-    if (maximum_u < minimum_u) return false;
+    if (maximum_u <= minimum_u) return false;
 
     float inset_u = (maximum_u - minimum_u) * 1e-5;
     if (any(origin + delta * minimum_u >= bounds_max)) minimum_u += inset_u;
@@ -193,13 +193,36 @@ bool inverse_ray_interval(float2 pixel, float2 origin,
     bool last_outside = any(last_point < bounds_min)
         || any(last_point >= bounds_max);
     if (first_outside || last_outside) {
-        // The relative inset may round away in float32; use an interior point.
-        if (maximum_u <= minimum_u) return false;
+        // The relative inset may round away in float32; search from an interior point.
         float midpoint_u = minimum_u + (maximum_u - minimum_u) * 0.5;
         float2 midpoint = origin + delta * midpoint_u;
         if (any(midpoint < bounds_min) || any(midpoint >= bounds_max)) return false;
-        if (first_outside) minimum_u = midpoint_u;
-        if (last_outside) maximum_u = midpoint_u;
+        if (first_outside) {
+            float outside_u = minimum_u;
+            float inside_u = midpoint_u;
+            [unroll]
+            for (int refinement = 0; refinement < 10; ++refinement) {
+                float candidate_u = outside_u + (inside_u - outside_u) * 0.5;
+                float2 candidate = origin + delta * candidate_u;
+                if (any(candidate < bounds_min) || any(candidate >= bounds_max))
+                    outside_u = candidate_u;
+                else inside_u = candidate_u;
+            }
+            minimum_u = inside_u;
+        }
+        if (last_outside) {
+            float inside_u = midpoint_u;
+            float outside_u = maximum_u;
+            [unroll]
+            for (int refinement = 0; refinement < 10; ++refinement) {
+                float candidate_u = inside_u + (outside_u - inside_u) * 0.5;
+                float2 candidate = origin + delta * candidate_u;
+                if (any(candidate < bounds_min) || any(candidate >= bounds_max))
+                    outside_u = candidate_u;
+                else inside_u = candidate_u;
+            }
+            maximum_u = inside_u;
+        }
     }
 
     float logarithmic_range = max(-log(safe_scale), 1e-6);
