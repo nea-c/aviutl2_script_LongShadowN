@@ -71,10 +71,6 @@
 --hide@texture_color_mix:texture_type==0
 --group
 
---group:Post-processing,false
---select@supersampling:Supersampling=0,None=0,2x=1
---group
-
 --[[pixelshader@direct_raymarch_shadow:
 Texture2D source_texture : register(t0);
 Texture2D blurred_source_one : register(t1);
@@ -91,7 +87,6 @@ cbuffer constant0 : register(b0) {
     float target_scale;
     float shadow_type;
     float quality_step;
-    float work_scale;
     float fade_in;
     float fade_out;
     float layer_selector;
@@ -310,7 +305,7 @@ float direct_sample_parameter(float start_parameter, float end_parameter,
         sample / max(active_samples - 1.0, 1.0));
 }
 float4 direct_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
-    float2 pixel = pos.xy / work_scale;
+    float2 pixel = pos.xy;
     float start_parameter, end_parameter, source_span;
     bool hit;
     if (shadow_type < 0.5) {
@@ -326,7 +321,7 @@ float4 direct_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
     if (!hit) return 0;
 
     int active_samples = min(8001,
-        max(2, (int)ceil(source_span * work_scale / quality_step) + 1));
+        max(2, (int)ceil(source_span / quality_step) + 1));
     float root_alpha = sample_source_alpha_direct(pixel);
     float coverage = 0;
     float weighted_distance = 0;
@@ -401,7 +396,6 @@ cbuffer constant0 : register(b0) {
     float fade_out;
     float dense_refine;
     float direct_quality_step;
-    float work_scale;
     float layer_selector;
 };
 float2 refine_offset(int index) {
@@ -662,8 +656,7 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
             }
             if (!hit) continue;
             active_samples = min(8001,
-                max(2, (int)ceil(source_span * work_scale
-                    / direct_quality_step) + 1));
+                max(2, (int)ceil(source_span / direct_quality_step) + 1));
         }
         [loop]
         for (int sample = 0; sample < 8001; ++sample) {
@@ -720,7 +713,6 @@ Texture2D shadow_texture : register(t0);
 Texture2D source_texture : register(t1);
 cbuffer constant0 : register(b0) {
     float2 source_size;
-    float work_scale;
 };
 float4 decode_source_color(float2 source_coordinate) {
     if (any(source_coordinate < 0.01)) return 0;
@@ -749,24 +741,7 @@ float4 decode_source_color(float2 source_coordinate) {
     return source.a > 0.0001 ? float4(source.rgb / source.a, 1) : 0;
 }
 float4 resolve_source_color(float4 pos : SV_Position) : SV_Target {
-    if (work_scale < 1.5) {
-        return decode_source_color(shadow_texture[int2(pos.xy)].rb);
-    }
-    int2 base = int2(pos.xy) * 2;
-    float3 color_sum = 0;
-    float weight_sum = 0;
-    [unroll]
-    for (int y = 0; y < 2; ++y) {
-        [unroll]
-        for (int x = 0; x < 2; ++x) {
-            float4 info = shadow_texture[base + int2(x, y)];
-            float4 color = decode_source_color(info.rb);
-            float weight = info.a * color.a;
-            color_sum += color.rgb * weight;
-            weight_sum += weight;
-        }
-    }
-    return weight_sum > 1e-6 ? float4(color_sum / weight_sum, 1) : 0;
+    return decode_source_color(shadow_texture[int2(pos.xy)].rb);
 }
 ]]
 
@@ -886,9 +861,7 @@ cbuffer constant0 : register(b0) {
     float2 buffer_size;
     float fade_in;
     float fade_out;
-    float work_scale;
     float2 source_offset;
-    float source_padding;
     float2 source_size;
 };
 float4 resolve_faded_shadow_info(float4 shadow_info) {
@@ -896,24 +869,7 @@ float4 resolve_faded_shadow_info(float4 shadow_info) {
     return float4(shadow_info.a, shadow_info.g, geometry, shadow_info.a);
 }
 float4 resolve_shadow(float4 pos : SV_Position) : SV_Target {
-    float4 shadow_info;
-    if (work_scale >= 1.5) {
-        int2 base = int2(pos.xy) * 2;
-        shadow_info = 0;
-        [unroll]
-        for (int y = 0; y < 2; ++y) {
-            [unroll]
-            for (int x = 0; x < 2; ++x) {
-                int2 work_position = base + int2(x, y);
-                float4 sample_info = shadow_texture[work_position];
-                shadow_info += sample_info;
-            }
-        }
-        shadow_info /= 4;
-    } else {
-        shadow_info = shadow_texture[int2(pos.xy)];
-    }
-    return resolve_faded_shadow_info(shadow_info);
+    return resolve_faded_shadow_info(shadow_texture[int2(pos.xy)]);
 }
 ]]
 
@@ -925,9 +881,7 @@ cbuffer constant0 : register(b0) {
     float2 buffer_size;
     float fade_in;
     float fade_out;
-    float work_scale;
     float2 source_offset;
-    float source_padding;
     float2 source_size;
 };
 float sample_root_alpha(float2 pixel) {
@@ -954,21 +908,7 @@ float4 resolve_layer_sample(float4 raw, float2 pixel) {
     return float4(coverage, coverage * distance, geometry, coverage);
 }
 float4 resolve_layered_r9(float4 pos : SV_Position) : SV_Target {
-    if (work_scale < 1.5)
-        return resolve_layer_sample(shadow_texture[int2(pos.xy)],
-            pos.xy / work_scale);
-    int2 base = int2(pos.xy) * 2;
-    float4 result = 0;
-    [unroll]
-    for (int y = 0; y < 2; ++y) {
-        [unroll]
-        for (int x = 0; x < 2; ++x) {
-            int2 sample_pos = base + int2(x, y);
-            result += resolve_layer_sample(shadow_texture[sample_pos],
-                (float2(sample_pos) + 0.5) / work_scale);
-        }
-    }
-    return result / 4;
+    return resolve_layer_sample(shadow_texture[int2(pos.xy)], pos.xy);
 }
 ]]
 
@@ -1223,7 +1163,6 @@ cbuffer constant0 : register(b0) {
     float target_scale;
     float shadow_type;
     float quality_step;
-    float work_scale;
 };
 float sample_source_alpha_direct(float2 pixel) {
     float2 local = pixel - source_offset;
@@ -1333,7 +1272,7 @@ float direct_sample_parameter(float start_parameter, float end_parameter,
         sample / max(active_samples - 1.0, 1.0));
 }
 float4 legacy_direct_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
-    float2 pixel = pos.xy / work_scale;
+    float2 pixel = pos.xy;
     float start_parameter, end_parameter, source_span;
     bool hit;
     if (shadow_type < 0.5) {
@@ -1348,7 +1287,7 @@ float4 legacy_direct_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
     if (!hit) return 0;
 
     int active_samples = min(8001,
-        max(2, (int)ceil(source_span * work_scale / quality_step) + 1));
+        max(2, (int)ceil(source_span / quality_step) + 1));
     float coverage = 0;
     float first_distance = 1;
     float2 first_source_coordinate = 0;
@@ -1404,7 +1343,6 @@ cbuffer constant0 : register(b0) {
     float fade_out;
     float dense_refine;
     float direct_quality_step;
-    float work_scale;
 };
 float2 refine_offset(int index) {
     int pair_index = index >> 1;
@@ -1426,18 +1364,18 @@ float sample_source_alpha(float2 pixel) {
         local / source_size, 0).a);
 }
 float extension_sample_alpha(float sample_alpha, float sample_travel,
-    float quality_step, float current_work_scale) {
+    float quality_step) {
     if (sample_travel <= 1e-6) return 0;
     float minimum_travel = quality_step > 0 && quality_step < 0.75
-        ? 0.75 / max(current_work_scale, 1) : 0;
+        ? 0.75 : 0;
     return sample_travel >= minimum_travel ? sample_alpha : 0;
 }
 void accumulate_shadow_coverages(float sample_alpha, float sample_travel,
-    float quality_step, float current_work_scale,
+    float quality_step,
     inout float total_coverage, inout float extension_coverage) {
     total_coverage += (1 - total_coverage) * sample_alpha;
     float extension_alpha = extension_sample_alpha(sample_alpha,
-        sample_travel, quality_step, current_work_scale);
+        sample_travel, quality_step);
     extension_coverage += (1 - extension_coverage) * extension_alpha;
 }
 float fade_weight_aa(float distance) {
@@ -1614,8 +1552,7 @@ float4 legacy_edge_antialias(float4 pos : SV_Position) : SV_Target {
             }
             if (!hit) continue;
             active_samples = min(8001,
-                max(2, (int)ceil(source_span * work_scale
-                    / direct_quality_step) + 1));
+                max(2, (int)ceil(source_span / direct_quality_step) + 1));
         }
         [loop]
         for (int sample = 0; sample < 8001; ++sample) {
@@ -1649,7 +1586,7 @@ float4 legacy_edge_antialias(float4 pos : SV_Position) : SV_Target {
                 found_source = true;
             }
             accumulate_shadow_coverages(sample_alpha,
-                length(source_pixel - pixel), direct_quality_step, work_scale,
+                length(source_pixel - pixel), direct_quality_step,
                 coverage, extension_coverage);
             if (coverage >= 0.9999 && extension_coverage >= 0.9999) break;
         }
@@ -1672,9 +1609,7 @@ cbuffer constant0 : register(b0) {
     float2 buffer_size;
     float fade_in;
     float fade_out;
-    float work_scale;
     float2 source_offset;
-    float source_padding;
     float2 source_size;
 };
 float sample_root_alpha(float2 pixel) {
@@ -1697,32 +1632,10 @@ float fade_weight(float distance) {
     return root * tip;
 }
 float4 legacy_resolve_shadow(float4 pos : SV_Position) : SV_Target {
-    float4 shadow_info;
-    float extension_coverage = 0;
-    if (work_scale >= 1.5) {
-        int2 base = int2(pos.xy) * 2;
-        shadow_info = 0;
-        [unroll]
-        for (int y = 0; y < 2; ++y) {
-            [unroll]
-            for (int x = 0; x < 2; ++x) {
-                int2 work_position = base + int2(x, y);
-                float4 sample_info = shadow_texture[work_position];
-                float2 pixel = (float2(work_position) + 0.5) / work_scale;
-                float root_alpha = sample_root_alpha(pixel);
-                extension_coverage += reconstruct_extension_coverage(
-                    sample_info.a, root_alpha);
-                shadow_info += sample_info;
-            }
-        }
-        shadow_info /= 4;
-        extension_coverage /= 4;
-    } else {
-        shadow_info = shadow_texture[int2(pos.xy)];
-        float root_alpha = sample_root_alpha(pos.xy / work_scale);
-        extension_coverage = reconstruct_extension_coverage(
-            shadow_info.a, root_alpha);
-    }
+    float4 shadow_info = shadow_texture[int2(pos.xy)];
+    float root_alpha = sample_root_alpha(pos.xy);
+    float extension_coverage = reconstruct_extension_coverage(
+        shadow_info.a, root_alpha);
     float distance = saturate(shadow_info.g / max(shadow_info.a, 1e-6));
     float weight = fade_weight(distance);
     float geometry = shadow_info.r > 0.01 && shadow_info.b > 0.01 ? 1 : 0;
@@ -1957,7 +1870,7 @@ for level = 1, 3 do
 end
 
 local function render_direct_shadow(buffer_w, buffer_h,
-    source_pos_x, source_pos_y, work_scale, layer_selector)
+    source_pos_x, source_pos_y, layer_selector)
     local target_scale, effective_length = 1, shadow_length
     if shadow_type >= 1 then
         target_scale, effective_length = get_radial_projection(
@@ -1965,13 +1878,13 @@ local function render_direct_shadow(buffer_w, buffer_h,
     end
     local quality_step = get_quality_config(effective_quality)
     local refine_sample_count = math.min(MAX_DIRECT_SAMPLES,
-        math.max(2, math.ceil(effective_length * work_scale / quality_step) + 1))
+        math.max(2, math.ceil(effective_length / quality_step) + 1))
     obj.clearbuffer("cache:longshadown_shadow_a", buffer_w, buffer_h)
     local legacy_blur = layer_selector < -1.5
     local direct_params = { buffer_w, buffer_h, source_offset_x, source_offset_y,
         source_w, source_h, source_pos_x, source_pos_y,
         math.cos(math.rad(angle)), math.sin(math.rad(angle)),
-        shadow_length, target_scale, shadow_type, quality_step, work_scale }
+        shadow_length, target_scale, shadow_type, quality_step }
     if not legacy_blur then
         direct_params[#direct_params + 1] = fade_in / 100
         direct_params[#direct_params + 1] = fade_out / 100
@@ -1989,7 +1902,7 @@ local function render_direct_shadow(buffer_w, buffer_h,
     return target_scale, refine_sample_count, quality_step
 end
 
-local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
+local function style_and_filter_shadow(buffer_w, buffer_h,
     target_scale, refine_sample_count, refine_samples, direct_quality_step,
     opacity_value, layer_selector)
     direct_quality_step = direct_quality_step or 0
@@ -2005,14 +1918,14 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
     obj.clearbuffer("cache:longshadown_source_color", buffer_w, buffer_h)
     obj.pixelshader("resolve_source_color", "cache:longshadown_source_color",
         { "cache:longshadown_shadow_a", "cache:longshadown_source" },
-        { source_w, source_h, work_scale }, "copy", "clamp")
+        { source_w, source_h }, "copy", "clamp")
     obj.clearbuffer("cache:longshadown_resolved", buffer_w, buffer_h)
     local resolve_shader = layer_selector >= 0 and "resolve_layered_r9"
         or (legacy_blur and "legacy_resolve_shadow" or "resolve_shadow")
     obj.pixelshader(resolve_shader, "cache:longshadown_resolved",
         { "cache:longshadown_shadow_a", "cache:longshadown_source" },
-        { buffer_w, buffer_h, fade_in_value, fade_out / 100, work_scale,
-          source_offset_x, source_offset_y, 0, source_w, source_h }, "copy", "clamp")
+        { buffer_w, buffer_h, fade_in_value, fade_out / 100,
+          source_offset_x, source_offset_y, source_w, source_h }, "copy", "clamp")
     if layer_selector < 0 then
     obj.clearbuffer("cache:longshadown_shadow_b", buffer_w, buffer_h)
     local edge_params = { buffer_w, buffer_h, source_offset_x, source_offset_y,
@@ -2020,7 +1933,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
         math.cos(math.rad(angle)), math.sin(math.rad(angle)),
         shadow_length, target_scale, shadow_type, refine_sample_count,
         refine_samples, fade_in_value, fade_out / 100,
-        effective_quality >= 2 and 1 or 0, direct_quality_step, work_scale }
+        effective_quality >= 2 and 1 or 0, direct_quality_step }
     if not legacy_blur then edge_params[#edge_params + 1] = layer_selector end
     obj.pixelshader(legacy_blur and "legacy_edge_antialias"
         or "edge_antialias", "cache:longshadown_shadow_b",
@@ -2147,33 +2060,22 @@ local function prepare_integrated_source_blur()
     end
 end
 
-local requested_work_scale = supersampling == 1 and 2 or 1
--- The legacy Directional blur is visually stable at native source resolution.
-local work_scale = shadow_type == 0 and blur_shadow > 0
-    and 1 or requested_work_scale
-if obj.w * work_scale > max_w or obj.h * work_scale > max_h
-    or obj.w * obj.h * work_scale * work_scale > MAX_BUFFER_PIXELS then
-    work_scale = 1
-    debug_print('[LongShadowN] 2x supersampling disabled: work buffer limit')
-end
-local work_w, work_h = obj.w * work_scale, obj.h * work_scale
-
 if should_render_shadow then
     local _, refine_samples = get_quality_config(effective_quality)
     if shadow_type == 0 and blur_shadow > 0
         and texture_type == 2 and has_texture ~= 0 then
         prepare_integrated_source_blur()
         local target_scale, count, step = render_direct_shadow(
-            work_w, work_h, source_pos_x, source_pos_y, work_scale, 2)
-        style_and_filter_shadow(obj.w, obj.h, work_scale,
+            obj.w, obj.h, source_pos_x, source_pos_y, 2)
+        style_and_filter_shadow(obj.w, obj.h,
             target_scale, count, refine_samples, step,
             shadow_opacity / 100, 2)
         apply_integrated_blurred_2d_texture()
     elseif shadow_type == 0 and blur_shadow > 0 then
         for layer = 0, 1 do
             local target_scale, count, step = render_direct_shadow(
-                work_w, work_h, source_pos_x, source_pos_y, work_scale, layer)
-            style_and_filter_shadow(obj.w, obj.h, work_scale,
+                obj.w, obj.h, source_pos_x, source_pos_y, layer)
+            style_and_filter_shadow(obj.w, obj.h,
                 target_scale, count, refine_samples, step, 1, layer)
             if layer == 0 then
                 obj.copybuffer("cache:longshadown_layer_front", "cache:longshadown_final")
@@ -2235,8 +2137,8 @@ if should_render_shadow then
     else
         local selector = shadow_type == 0 and blur_shadow > 0 and -2 or -1
         local target_scale, count, step = render_direct_shadow(
-            work_w, work_h, source_pos_x, source_pos_y, work_scale, selector)
-        style_and_filter_shadow(obj.w, obj.h, work_scale,
+            obj.w, obj.h, source_pos_x, source_pos_y, selector)
+        style_and_filter_shadow(obj.w, obj.h,
             target_scale, count, refine_samples, step,
             shadow_opacity / 100, selector)
     end

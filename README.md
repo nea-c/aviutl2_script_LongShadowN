@@ -8,9 +8,12 @@
 
 ## 最新 / Latest
 
-**r11**
+**r12**
 
 ## 変更履歴 / Change log
+
+- r12
+  - ほとんど効果を得られないため、`Supersampling`を削除
 
 - r11
   - 問題がありすぎたので`Blur Shadow`パラメータを削除

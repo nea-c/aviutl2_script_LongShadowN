@@ -317,7 +317,7 @@ test("Direct quality spacing remains 4 2 1 and 0.5 source pixels", () => {
   assert.ok(renderer, "render_direct_shadow was not found");
   assert.match(
     renderer[0],
-    /math\.ceil\(effective_length \* work_scale \/ quality_step\) \+ 1/,
+    /math\.ceil\(effective_length \/ quality_step\) \+ 1/,
   );
   assert.match(renderer[0], /math\.min\(MAX_DIRECT_SAMPLES,/);
 });
@@ -406,7 +406,7 @@ test("edge refinement mirrors generalized Direct traversal", () => {
   assert.match(shader[1], /if \(direct_quality_step > 0\)/);
   assert.match(
     shader[1],
-    /ceil\(source_span \* work_scale\s*\/ direct_quality_step\) \+ 1/,
+    /ceil\(source_span \/ direct_quality_step\) \+ 1/,
   );
   assert.match(
     shader[1],
@@ -428,7 +428,7 @@ test("edge refinement mirrors generalized Direct traversal", () => {
   assert.match(style[0], /direct_quality_step = direct_quality_step or 0/);
   assert.match(
     style[0],
-    /refine_samples, fade_in_value, fade_out \/ 100,[\s\S]*?direct_quality_step, work_scale/,
+    /refine_samples, fade_in_value, fade_out \/ 100,[\s\S]*?direct_quality_step/,
   );
 });
 
@@ -877,7 +877,7 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
     "resolve_shadow attenuated already-faded ray coverage");
   assert.match(shader,
-    /return resolve_faded_shadow_info\(shadow_info\);/,
+    /return resolve_faded_shadow_info\(shadow_texture\[int2\(pos\.xy\)\]\);/,
     "resolve_shadow bypassed the single-Fade resolve contract");
 });
 
@@ -948,40 +948,17 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     "repeated samples amplified a non-extending antialiased edge");
 });
 
-test("2x resolve averages already-faded per-sample coverage", () => {
-  const source = readFileSync(scriptPath, "utf8");
-  const shader = source.match(
-    /--\[\[pixelshader@resolve_shadow:([\s\S]*?)\]\]/)?.[1];
-  assert.ok(shader, "resolve_shadow shader was not found");
-  const resolveFaded = extractFunction(
-    shader, "resolve_faded_shadow_info", "float4");
-  const assembly = compileConstantResult(`
-${resolveFaded}
-float4 testmain(float4 pos : SV_Position) : SV_Target {
-    float4 averaged = (float4(0.2, 0.1, 0.3, 0.2)
-        + float4(0.4, 0.6, 0.5, 0.8)) * 0.5;
-    float4 result = resolve_faded_shadow_info(averaged);
-    bool correct = all(abs(result - float4(0.5, 0.35, 1, 0.5)) < 1e-6);
-    return correct ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-}
-`);
-  assert.match(assembly,
-    /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/);
-  assert.match(shader, /shadow_info \/= 4;[\s\S]*return resolve_faded_shadow_info\(shadow_info\);/,
-    "2x resolve did not average completed per-sample Fade results");
-});
-
 test("resolve shadow constants preserve HLSL register alignment", () => {
   const source = readFileSync(scriptPath, "utf8");
   const shader = source.match(
     /--\[\[pixelshader@resolve_shadow:([\s\S]*?)\]\]/)?.[1];
   assert.ok(shader, "resolve_shadow shader was not found");
   assert.match(shader,
-    /float work_scale;\s*float2 source_offset;\s*float source_padding;\s*float2 source_size;/,
+    /float2 buffer_size;\s*float fade_in;\s*float fade_out;\s*float2 source_offset;\s*float2 source_size;/,
     "resolve_shadow source_size can straddle the Lua/HLSL register boundary");
   assert.match(source,
-    /fade_out \/ 100, work_scale,\s*source_offset_x, source_offset_y, 0, source_w, source_h/,
-    "Lua did not supply the HLSL padding slot before source_size");
+    /fade_out \/ 100,\s*source_offset_x, source_offset_y, source_w, source_h/,
+    "Lua did not supply the packed source_offset and source_size values");
 });
 
 test("edge refinement emits per-sample faded coverage in resolved red", () => {
