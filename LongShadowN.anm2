@@ -1,6 +1,6 @@
 --require:2011000
 --label:加工
---information:LongShadowN r1
+--information:LongShadowN r13
 
 --select@shadow_type:Type=0,Directional=0,Radial=1,Inverse Radial=2
 --select@quality:Quality=1,Draft=0,Standard=1,High=2,Ultra=3
