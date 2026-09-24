@@ -281,7 +281,7 @@ test("Direct shader and Lua renderer share the packed source contract", () => {
   assert.match(shader[1], /Texture2D source_texture : register\(t0\)/);
   assert.match(
     shader[1],
-    /return float4\(selected_source_coordinate\.x, weighted_distance,\s*selected_source_coordinate\.y, coverage\)/,
+    /return float4\(selected_source_coordinate\.x,\s*layer_selector > 2\.5 \? selected_distance \* coverage : weighted_distance,\s*selected_source_coordinate\.y, coverage\)/,
   );
   assert.match(
     shader[1],
@@ -423,7 +423,7 @@ test("edge refinement mirrors generalized Direct traversal", () => {
   assert.ok(style, "style_and_filter_shadow was not found");
   assert.match(
     style[0],
-    /target_scale, refine_sample_count, refine_samples, direct_quality_step,\s*opacity_value, layer_selector\)/,
+    /target_scale, refine_sample_count, refine_samples, direct_quality_step,\s*opacity_value, layer_selector, skip_blur\)/,
   );
   assert.match(style[0], /direct_quality_step = direct_quality_step or 0/);
   assert.match(
@@ -832,10 +832,20 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
   assert.match(assembly, /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/);
 });
 
-test("untextured Directional blur uses reduced source buffers while 2D keeps full resolution", () => {
+test("integrated Directional blur prefilters reduced source buffers while 2D keeps full resolution", () => {
   const source = readFileSync(scriptPath, "utf8");
   const preblur = source.match(/local function prepare_integrated_source_blur\([\s\S]*?\r?\nend/)?.[0];
   assert.ok(preblur, "integrated source blur was not found");
+  const expansion = source.match(/--\[\[pixelshader@expand_source_for_blur:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(expansion, "blur source must be placed in transparent expanded bounds");
+  assert.match(expansion, /if \(any\(local < 0\) \|\| any\(local >= source_size\)\) return 0/);
+  assert.match(preblur, /obj\.pixelshader\("expand_source_for_blur",\s*"cache:longshadown_expanded_source",\s*"cache:longshadown_source"/);
+  assert.doesNotMatch(preblur, /obj\.copybuffer\("cache:longshadown_expanded_source",\s*"object"\)/);
+  const downsample = source.match(/--\[\[pixelshader@downsample_source_2x:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(downsample, "reduced blur sources must be prefiltered before sampling");
+  assert.match(downsample, /0\.25\s*\*/);
+  assert.match(preblur, /obj\.pixelshader\("downsample_source_2x"/);
+  assert.match(preblur, /"cache:longshadown_source_mip_"\s*\.\.\s*downsample/);
   assert.match(preblur, /while radius \/ downsample > 10 and downsample < 16 do/);
   assert.match(preblur, /obj\.clearbuffer\("cache:longshadown_source_blur_work", blur_w, blur_h\)/);
   assert.match(preblur, /\{ blur_w, blur_h, 1, 0, radius \* blur_w \/ obj\.w \}/);
@@ -844,14 +854,99 @@ test("untextured Directional blur uses reduced source buffers while 2D keeps ful
     source.indexOf("local object_red", source.lastIndexOf("if should_render_shadow then")));
   assert.match(renderBlock, /shadow_type == 0 and blur_shadow > 0/);
   assert.match(renderBlock, /local integrated_texture = texture_type == 2 and has_texture ~= 0/);
-  assert.match(renderBlock, /integrated_texture or has_texture == 0 or texture_type == 1/);
+  assert.match(renderBlock, /integrated_texture or texture_type == 1/);
   assert.match(renderBlock, /prepare_integrated_source_blur\(not integrated_texture\)/);
   assert.match(renderBlock, /if integrated_texture then\s+apply_integrated_blurred_2d_texture\(\)/);
   assert.match(renderBlock, /for layer = 0, 1 do/);
   assert.match(renderBlock, /combine_shadow_layers/);
-  assert.match(renderBlock, /local selector = shadow_type == 0 and blur_shadow > 0 and -2 or -1/);
+  assert.match(renderBlock, /local selector = -1/);
   assert.match(source, /"layer_front"/);
   assert.match(renderBlock, /else[\s\S]*obj\.clearbuffer\("cache:longshadown_final", obj\.w, obj\.h\)/);
+});
+
+test("progressive Directional Softness keeps a strongest-sample alternative", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(/--\[\[pixelshader@direct_raymarch_shadow:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(shader);
+  const helpers = [
+    extractFunction(shader, "union_coverage", "float"),
+    extractFunction(shader, "shadow_only_coverage", "float"),
+    extractFunction(shader, "conditional_shadow_coverage", "float"),
+    extractFunction(shader, "fade_weight_sample", "float"),
+    extractFunction(shader, "accumulate_faded_shadow_sample", "bool"),
+  ].join("\n");
+  const assembly = compileConstantResult(`
+static const float fade_in = 0;
+static const float fade_out = 0;
+${helpers}
+float run_two() {
+    float coverage = 0, distance_sum = 0;
+    accumulate_faded_shadow_sample(.5, 0, .5, coverage, distance_sum);
+    accumulate_faded_shadow_sample(.5, 0, .5, coverage, distance_sum);
+    return coverage;
+}
+float run_stronger() {
+    float coverage = 0, distance_sum = 0;
+    accumulate_faded_shadow_sample(.5, 0, .5, coverage, distance_sum);
+    accumulate_faded_shadow_sample(.7, 0, .5, coverage, distance_sum);
+    return coverage;
+}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    bool correct = abs(run_two() - .5) < 1e-5
+        && abs(run_stronger() - .7) < 1e-5;
+    return correct ? float4(0,1,0,1) : float4(1,0,0,1);
+}`);
+  assert.match(assembly, /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/);
+  assert.match(shader, /layer_selector > 2\.5[\s\S]*accumulate_faded_shadow_sample/);
+  const style = source.match(/local function style_and_filter_shadow\([\s\S]*?\r?\nend/)?.[0];
+  assert.match(style, /layer_selector >= 0 and layer_selector < 2\.5[\s\S]*"resolve_layered_r9"/);
+});
+
+test("untextured progressive Softness uses the maximum sample across its full range", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(/--\[\[pixelshader@direct_raymarch_shadow:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(shader);
+  assert.doesNotMatch(shader, /accumulate_progressive_density_sample|progressive_softness_weight/);
+  assert.match(shader, /layer_selector > 2\.5[\s\S]*accumulate_faded_shadow_sample\(sample_alpha, root_alpha/);
+  const render = source.slice(source.lastIndexOf("if should_render_shadow then"),
+    source.indexOf("local object_red", source.lastIndexOf("if should_render_shadow then")));
+  const untextured = render.slice(render.indexOf("if shadow_type == 0 and blur_shadow > 0 and has_texture == 0 then"),
+    render.indexOf("elseif shadow_type == 0", render.indexOf("if shadow_type == 0 and blur_shadow > 0 and has_texture == 0 then")));
+  assert.match(untextured, /prepare_integrated_source_blur\(true\)/);
+  assert.match(untextured, /render_direct_shadow\(\s*obj\.w, obj\.h, source_pos_x, source_pos_y, 3\)/);
+  assert.doesNotMatch(untextured, /blend_shadow_blur_levels/);
+});
+
+test("progressive Softness resolves color from the blurred contributing source", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const direct = source.match(/--\[\[pixelshader@direct_raymarch_shadow:([\s\S]*?)\]\]/)?.[1];
+  const color = source.match(/--\[\[pixelshader@resolve_progressive_source_color:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(direct);
+  assert.ok(color, "progressive samples need their own source-color resolver");
+  assert.match(direct, /layer_selector > 2\.5[\s\S]*source_pixel \/ buffer_size/);
+  assert.match(color, /shadow_texture\[int2\(pos\.xy\)\]/);
+  assert.match(color, /shadow\.rb/);
+  assert.match(color, /blurred_source_one\.SampleLevel\(linear_sampler, uv, 0\)/);
+  assert.match(color, /blurred_source_two\.SampleLevel\(linear_sampler, uv, 0\)/);
+  assert.match(color, /blurred_source_three\.SampleLevel\(linear_sampler, uv, 0\)/);
+  assert.match(color, /source\.rgb \/ source\.a/);
+  const style = source.match(/local function style_and_filter_shadow\([\s\S]*?\r?\nend/)?.[0];
+  assert.match(style, /layer_selector > 2\.5[\s\S]*obj\.pixelshader\("resolve_progressive_source_color"/);
+  const render = source.slice(source.lastIndexOf("if should_render_shadow then"),
+    source.indexOf("local object_red", source.lastIndexOf("if should_render_shadow then")));
+  const untextured = render.slice(render.indexOf("if shadow_type == 0 and blur_shadow > 0 and has_texture == 0 then"),
+    render.indexOf("elseif shadow_type == 0", render.indexOf("if shadow_type == 0 and blur_shadow > 0 and has_texture == 0 then")));
+  assert.match(untextured, /style_and_filter_shadow\([\s\S]*?release_integrated_source_blur\(\)/);
+});
+
+test("small Softness keeps the hard path below one pixel", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const render = source.slice(source.lastIndexOf("if should_render_shadow then"),
+    source.indexOf("local object_red", source.lastIndexOf("if should_render_shadow then")));
+  const untextured = render.slice(render.indexOf("if shadow_type == 0 and blur_shadow > 0 and has_texture == 0 then"),
+    render.indexOf("elseif shadow_type == 0", render.indexOf("if shadow_type == 0 and blur_shadow > 0 and has_texture == 0 then")));
+  assert.match(untextured, /if blur_shadow <= 1 then[\s\S]*render_direct_shadow\(\s*obj\.w, obj\.h, source_pos_x, source_pos_y, -1\)/);
+  assert.match(untextured, /else[\s\S]*render_direct_shadow\(\s*obj\.w, obj\.h, source_pos_x, source_pos_y, 3\)/);
 });
 
 test("large scratch buffers are released before later shadow passes", () => {

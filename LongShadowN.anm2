@@ -328,9 +328,11 @@ float4 direct_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
     int active_samples = min(8001,
         max(2, (int)ceil(source_span / quality_step) + 1));
     float root_alpha = sample_source_alpha_direct(pixel);
-    if (layer_selector < -0.5 && 1 - root_alpha <= 1e-6) return 0;
+    if ((layer_selector < -0.5 || layer_selector > 2.5)
+            && 1 - root_alpha <= 1e-6) return 0;
     float coverage = 0;
     float weighted_distance = 0;
+    float selected_distance = 0;
     float2 selected_source_coordinate = 0;
     LayeredSampleState layer_state = (LayeredSampleState)0;
     // The first front sample already includes the root. Rear needs the same
@@ -356,9 +358,17 @@ float4 direct_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
             : sample_source_alpha_direct(source_pixel);
         float2 source_local = clamp(floor(source_pixel - source_offset),
             0, source_size - 1);
-        float2 source_coordinate = 0.125
-            + 0.75 * (source_local + 0.5) / source_size;
-        if (layer_selector > 1.5) {
+        float2 source_coordinate = layer_selector > 2.5
+            ? 0.125 + 0.75 * source_pixel / buffer_size
+            : 0.125 + 0.75 * (source_local + 0.5) / source_size;
+        if (layer_selector > 2.5) {
+            if (accumulate_faded_shadow_sample(sample_alpha, root_alpha,
+                    distance, coverage, weighted_distance)) {
+                selected_source_coordinate = source_coordinate;
+                selected_distance = distance;
+            }
+            if (coverage >= 0.9999) break;
+        } else if (layer_selector > 1.5) {
             float combined = max(coverage, sample_alpha);
             float gain = combined - coverage;
             weighted_distance += distance * gain;
@@ -378,7 +388,8 @@ float4 direct_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
     }
     if (layer_selector >= -0.5 && layer_selector < 1.5)
         return pack_layered_shadow(layer_state, layer_selector);
-    return float4(selected_source_coordinate.x, weighted_distance,
+    return float4(selected_source_coordinate.x,
+        layer_selector > 2.5 ? selected_distance * coverage : weighted_distance,
         selected_source_coordinate.y, coverage);
 }
 ]]
@@ -757,6 +768,60 @@ float4 resolve_source_color(float4 pos : SV_Position) : SV_Target {
 }
 ]]
 
+--[[pixelshader@resolve_progressive_source_color:
+Texture2D shadow_texture : register(t0);
+Texture2D source_texture : register(t1);
+Texture2D blurred_source_one : register(t2);
+Texture2D blurred_source_two : register(t3);
+Texture2D blurred_source_three : register(t4);
+SamplerState linear_sampler : register(s0);
+cbuffer constant0 : register(b0) {
+    float2 buffer_size;
+    float2 source_offset;
+    float2 source_size;
+    float blur_radius;
+};
+float4 sample_progressive_source_color(float2 uv, float distance) {
+    float2 pixel = uv * buffer_size;
+    float2 local = pixel - source_offset;
+    float4 original = 0;
+    if (all(local >= 0) && all(local < source_size))
+        original = source_texture.SampleLevel(linear_sampler,
+            local / source_size, 0);
+    float wanted_radius = saturate(distance) * blur_radius;
+    float first_radius = blur_radius < 1 ? blur_radius
+        : pow(max(blur_radius, 1), 1.0 / 3.0);
+    float second_radius = blur_radius < 1 ? blur_radius
+        : pow(max(blur_radius, 1), 2.0 / 3.0);
+    float4 first = blurred_source_one.SampleLevel(linear_sampler, uv, 0);
+    float4 second = blurred_source_two.SampleLevel(linear_sampler, uv, 0);
+    float4 third = blurred_source_three.SampleLevel(linear_sampler, uv, 0);
+    float4 source;
+    if (wanted_radius <= first_radius)
+        source = lerp(original, first,
+            wanted_radius / max(first_radius, 1e-6));
+    else if (wanted_radius <= second_radius)
+        source = lerp(first, second,
+            (wanted_radius - first_radius)
+                / max(second_radius - first_radius, 1e-6));
+    else
+        source = lerp(second, third,
+            (wanted_radius - second_radius)
+                / max(blur_radius - second_radius, 1e-6));
+    // A faint blurred alpha can still carry a usable color. The broadest
+    // source level is a stable fallback for neighboring transparent texels.
+    if (source.a <= 0.0001) source = third;
+    return source.a > 0.0001 ? float4(source.rgb / source.a, 1) : 0;
+}
+float4 resolve_progressive_source_color(float4 pos : SV_Position) : SV_Target {
+    float4 shadow = shadow_texture[int2(pos.xy)];
+    if (shadow.a <= 1e-7 || any(shadow.rb < 0.01)) return 0;
+    float2 uv = saturate((shadow.rb - 0.125) / 0.75);
+    float distance = saturate(shadow.g / max(shadow.a, 1e-6));
+    return sample_progressive_source_color(uv, distance);
+}
+]]
+
 --[[pixelshader@style_shadow:
 Texture2D shadow_texture : register(t0);
 Texture2D texture_texture : register(t1);
@@ -1030,6 +1095,19 @@ float4 combine_shadow_layers(float4 pos : SV_Position) : SV_Target {
 }
 ]]
 
+--[[pixelshader@expand_source_for_blur:
+Texture2D source_texture : register(t0);
+cbuffer constant0 : register(b0) {
+    float2 source_offset;
+    float2 source_size;
+};
+float4 expand_source_for_blur(float4 pos : SV_Position) : SV_Target {
+    float2 local = pos.xy - source_offset;
+    if (any(local < 0) || any(local >= source_size)) return 0;
+    return source_texture.Load(int3(int2(local), 0));
+}
+]]
+
 --[[pixelshader@fixed_source_blur:
 Texture2D input_texture : register(t0);
 SamplerState linear_sampler : register(s0);
@@ -1056,6 +1134,63 @@ float4 fixed_source_blur(float4 pos : SV_Position) : SV_Target {
         total_weight += weight;
     }
     return total_weight > 0 ? sum / total_weight : 0;
+}
+]]
+
+--[[pixelshader@downsample_source_2x:
+Texture2D source_texture : register(t0);
+cbuffer constant0 : register(b0) {
+    float2 source_size;
+};
+float4 source_pixel(int2 pixel) {
+    return source_texture.Load(int3(clamp(pixel, int2(0, 0),
+        int2(source_size) - 1), 0));
+}
+float4 downsample_source_2x(float4 pos : SV_Position) : SV_Target {
+    int2 pixel = int2(pos.xy) * 2;
+    return 0.25 * (source_pixel(pixel)
+        + source_pixel(pixel + int2(1, 0))
+        + source_pixel(pixel + int2(0, 1))
+        + source_pixel(pixel + int2(1, 1)));
+}
+]]
+
+--[[pixelshader@blend_shadow_blur_levels:
+Texture2D sharp_shadow : register(t0);
+Texture2D blurred_one : register(t1);
+Texture2D blurred_two : register(t2);
+Texture2D blurred_three : register(t3);
+Texture2D distance_texture : register(t4);
+SamplerState linear_sampler : register(s0);
+cbuffer constant0 : register(b0) {
+    float2 buffer_size;
+    float blur_radius;
+};
+float4 select_shadow_blur_level(float4 sharp, float4 one, float4 two,
+    float4 three, float wanted, float first_radius,
+    float second_radius, float maximum_radius) {
+    if (wanted <= first_radius)
+        return lerp(sharp, one, wanted / max(first_radius, 1e-6));
+    if (wanted <= second_radius)
+        return lerp(one, two, (wanted - first_radius)
+            / max(second_radius - first_radius, 1e-6));
+    return lerp(two, three, (wanted - second_radius)
+        / max(maximum_radius - second_radius, 1e-6));
+}
+float4 blend_shadow_blur_levels(float4 pos : SV_Position) : SV_Target {
+    float2 uv = pos.xy / buffer_size;
+    float4 distance_info = distance_texture.SampleLevel(linear_sampler, uv, 0);
+    float distance = distance_info.a > 1e-6
+        ? saturate(distance_info.g / distance_info.a) : 0;
+    float first_radius = blur_radius < 1 ? blur_radius
+        : pow(max(blur_radius, 1), 1.0 / 3.0);
+    float second_radius = blur_radius < 1 ? blur_radius
+        : pow(max(blur_radius, 1), 2.0 / 3.0);
+    return select_shadow_blur_level(sharp_shadow[int2(pos.xy)],
+        blurred_one.SampleLevel(linear_sampler, uv, 0),
+        blurred_two.SampleLevel(linear_sampler, uv, 0),
+        blurred_three.SampleLevel(linear_sampler, uv, 0),
+        distance * blur_radius, first_radius, second_radius, blur_radius);
 }
 ]]
 
@@ -1832,7 +1967,7 @@ source_pos_y = source_pos_y + source_offset_y + source_h / 2
 local has_texture, texture_w, texture_h = load_shadow_texture(should_render_shadow)
 -- External effects may use the same names. Reset scratch resources after their
 -- evaluation, then overwrite every source/resource before any subsequent read.
-for _, name in ipairs({ "shadow_a", "shadow_b", "shadow_c", "resolved", "source_color", "final", "filtered", "source", "layer_front" }) do
+for _, name in ipairs({ "shadow_a", "shadow_b", "shadow_c", "resolved", "source_color", "final", "filtered", "source", "layer_front", "distance_field" }) do
     obj.clearbuffer("cache:longshadown_" .. name, 1, 1)
 end
 for level = 1, 3 do
@@ -1874,7 +2009,7 @@ end
 
 local function style_and_filter_shadow(buffer_w, buffer_h,
     target_scale, refine_sample_count, refine_samples, direct_quality_step,
-    opacity_value, layer_selector)
+    opacity_value, layer_selector, skip_blur)
     direct_quality_step = direct_quality_step or 0
     local legacy_blur = layer_selector < -1.5
     local fade_in_value = legacy_blur and (1 - fade_in / 100) or fade_in / 100
@@ -1886,11 +2021,23 @@ local function style_and_filter_shadow(buffer_w, buffer_h,
         and texture_type == 2
         and has_texture ~= 0 and 0 or has_texture
     obj.clearbuffer("cache:longshadown_source_color", buffer_w, buffer_h)
-    obj.pixelshader("resolve_source_color", "cache:longshadown_source_color",
-        { "cache:longshadown_shadow_a", "cache:longshadown_source" },
-        { source_w, source_h }, "copy", "clamp")
+    if layer_selector > 2.5 then
+        obj.pixelshader("resolve_progressive_source_color",
+            "cache:longshadown_source_color",
+            { "cache:longshadown_shadow_a", "cache:longshadown_source",
+              "cache:longshadown_source_blur_1",
+              "cache:longshadown_source_blur_2",
+              "cache:longshadown_source_blur_3" },
+            { buffer_w, buffer_h, source_offset_x, source_offset_y,
+              source_w, source_h, blur_shadow }, "copy", "clamp")
+    else
+        obj.pixelshader("resolve_source_color", "cache:longshadown_source_color",
+            { "cache:longshadown_shadow_a", "cache:longshadown_source" },
+            { source_w, source_h }, "copy", "clamp")
+    end
     obj.clearbuffer("cache:longshadown_resolved", buffer_w, buffer_h)
-    local resolve_shader = layer_selector >= 0 and "resolve_layered_r9"
+    local resolve_shader = layer_selector >= 0 and layer_selector < 2.5
+        and "resolve_layered_r9"
         or (legacy_blur and "legacy_resolve_shadow" or "resolve_shadow")
     obj.pixelshader(resolve_shader, "cache:longshadown_resolved",
         { "cache:longshadown_shadow_a", "cache:longshadown_source" },
@@ -1944,7 +2091,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h,
               layer_selector > 1.5 and 1 or 0 }, "copy", "clamp")
     end
     obj.clearbuffer("cache:longshadown_source_color", 1, 1)
-    if blur_shadow > 0 and layer_selector < 1.5 then
+    if blur_shadow > 0 and layer_selector < 1.5 and not skip_blur then
         obj.clearbuffer("cache:longshadown_blur_distance_a", buffer_w, buffer_h)
         obj.pixelshader("spread_blur_distance", "cache:longshadown_blur_distance_a",
             "cache:longshadown_resolved",
@@ -2027,7 +2174,33 @@ local function apply_integrated_blurred_2d_texture()
 end
 
 local function prepare_integrated_source_blur(fast)
-    obj.copybuffer("cache:longshadown_expanded_source", "object")
+    obj.clearbuffer("cache:longshadown_expanded_source", obj.w, obj.h)
+    obj.pixelshader("expand_source_for_blur",
+        "cache:longshadown_expanded_source", "cache:longshadown_source",
+        { source_offset_x, source_offset_y, source_w, source_h },
+        "copy", "clamp")
+    local maximum_downsample = 1
+    if fast then
+        while blur_shadow / maximum_downsample > 10
+            and maximum_downsample < 16 do
+            maximum_downsample = maximum_downsample * 2
+        end
+    end
+    local mip_downsample = 1
+    local mip_source = "cache:longshadown_expanded_source"
+    while mip_downsample < maximum_downsample do
+        local next_downsample = mip_downsample * 2
+        local destination = "cache:longshadown_source_mip_" .. next_downsample
+        obj.clearbuffer(destination,
+            math.max(1, math.ceil(obj.w / next_downsample)),
+            math.max(1, math.ceil(obj.h / next_downsample)))
+        obj.pixelshader("downsample_source_2x", destination, mip_source,
+            { math.max(1, math.ceil(obj.w / mip_downsample)),
+              math.max(1, math.ceil(obj.h / mip_downsample)) },
+            "copy", "clamp")
+        mip_downsample = next_downsample
+        mip_source = destination
+    end
     for level = 1, 3 do
         local radius = blur_shadow < 1 and blur_shadow
             or blur_shadow ^ (level / 3)
@@ -2040,10 +2213,13 @@ local function prepare_integrated_source_blur(fast)
         end
         local blur_w = math.max(1, math.ceil(obj.w / downsample))
         local blur_h = math.max(1, math.ceil(obj.h / downsample))
+        local blur_source = downsample == 1
+            and "cache:longshadown_expanded_source"
+            or "cache:longshadown_source_mip_" .. downsample
         obj.clearbuffer("cache:longshadown_source_blur_work", blur_w, blur_h)
         obj.pixelshader("fixed_source_blur",
             "cache:longshadown_source_blur_work",
-            "cache:longshadown_expanded_source",
+            blur_source,
             { blur_w, blur_h, 1, 0, radius * blur_w / obj.w }, "copy", "clamp")
         obj.clearbuffer(destination, blur_w, blur_h)
         obj.pixelshader("fixed_source_blur", destination,
@@ -2052,6 +2228,11 @@ local function prepare_integrated_source_blur(fast)
     end
     obj.clearbuffer("cache:longshadown_expanded_source", 1, 1)
     obj.clearbuffer("cache:longshadown_source_blur_work", 1, 1)
+    mip_downsample = 2
+    while mip_downsample <= maximum_downsample do
+        obj.clearbuffer("cache:longshadown_source_mip_" .. mip_downsample, 1, 1)
+        mip_downsample = mip_downsample * 2
+    end
 end
 
 local function release_integrated_source_blur()
@@ -2063,8 +2244,25 @@ end
 if should_render_shadow then
     local _, refine_samples = get_quality_config(effective_quality)
     local integrated_texture = texture_type == 2 and has_texture ~= 0
-    if shadow_type == 0 and blur_shadow > 0
-        and (integrated_texture or has_texture == 0 or texture_type == 1) then
+    if shadow_type == 0 and blur_shadow > 0 and has_texture == 0 then
+        if blur_shadow <= 1 then
+            local target_scale, count, step = render_direct_shadow(
+                obj.w, obj.h, source_pos_x, source_pos_y, -1)
+            style_and_filter_shadow(obj.w, obj.h,
+                target_scale, count, refine_samples, step,
+                shadow_opacity / 100, -1, true)
+        else
+            prepare_integrated_source_blur(true)
+            local target_scale, count, step = render_direct_shadow(
+                obj.w, obj.h, source_pos_x, source_pos_y, 3)
+            style_and_filter_shadow(obj.w, obj.h,
+                target_scale, count, refine_samples, step,
+                shadow_opacity / 100, 3)
+            release_integrated_source_blur()
+        end
+        obj.clearbuffer("cache:longshadown_resolved", 1, 1)
+    elseif shadow_type == 0 and blur_shadow > 0
+        and (integrated_texture or texture_type == 1) then
         prepare_integrated_source_blur(not integrated_texture)
         local target_scale, count, step = render_direct_shadow(
             obj.w, obj.h, source_pos_x, source_pos_y, 2)
@@ -2077,7 +2275,7 @@ if should_render_shadow then
         else
             obj.clearbuffer("cache:longshadown_resolved", 1, 1)
         end
-    elseif shadow_type == 0 and blur_shadow > 0 then
+    elseif shadow_type == 0 and blur_shadow > 0 and has_texture ~= 0 then
         for layer = 0, 1 do
             local target_scale, count, step = render_direct_shadow(
                 obj.w, obj.h, source_pos_x, source_pos_y, layer)
@@ -2096,7 +2294,7 @@ if should_render_shadow then
         obj.clearbuffer("cache:longshadown_resolved", 1, 1)
         obj.clearbuffer("cache:longshadown_filtered", 1, 1)
     else
-        local selector = shadow_type == 0 and blur_shadow > 0 and -2 or -1
+        local selector = -1
         local target_scale, count, step = render_direct_shadow(
             obj.w, obj.h, source_pos_x, source_pos_y, selector)
         style_and_filter_shadow(obj.w, obj.h,
