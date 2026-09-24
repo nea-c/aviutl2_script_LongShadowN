@@ -1655,7 +1655,6 @@ end
 
 local MAX_SAMPLES = 2048
 local MAX_DIRECT_SAMPLES = 8001
-local MAX_BUFFER_PIXELS = 16777216
 
 local function get_quality_config(level)
     local configs = {
@@ -1807,13 +1806,8 @@ if shadow_type >= 1 then
     end
 end
 
-local max_w, max_h = obj.getinfo("image_max")
-max_w, max_h = math.min(16384, max_w or 16384), math.min(16384, max_h or 16384)
-local invalid_size = source_w <= 0 or source_h <= 0 or source_w > max_w or source_h > max_h
-    or source_w * source_h > MAX_BUFFER_PIXELS
-should_render_shadow = should_render_shadow and not invalid_size
-if invalid_size then
-    debug_print("[LongShadowN] shadow skipped: empty or oversized input", source_w, source_h)
+if source_w <= 0 or source_h <= 0 then
+    debug_print("[LongShadowN] shadow skipped: empty input", source_w, source_h)
     return
 end
 local texture_margin = 2
@@ -1826,29 +1820,6 @@ local left, top, right, bottom = compute_padding(shadow_type, shadow_length, ang
 if not should_render_shadow then
     left, top, right, bottom = 0, 0, 0, 0
     texture_left, texture_top, texture_right, texture_bottom = 0, 0, 0, 0
-end
-local function clamp_padding(first, last, available)
-    available = math.max(0, available)
-    if first + last <= available then return first, last end
-    debug_print("[LongShadowN] expansion clamped: requested padding exceeds image limit")
-    local kept_first = math.floor(first * available / (first + last))
-    return kept_first, available - kept_first
-end
-left, right = clamp_padding(left, right, max_w - source_w)
-top, bottom = clamp_padding(top, bottom, max_h - source_h)
-if (source_w + left + right) * (source_h + top + bottom) > MAX_BUFFER_PIXELS then
-    -- Shrink only the padding, retaining the entire source and each side's
-    -- proportional share. The existing center correction keeps it aligned.
-    local low, high = 0, 1
-    for _ = 1, 32 do
-        local factor = (low + high) / 2
-        local w = source_w + math.floor(left * factor) + math.floor(right * factor)
-        local h = source_h + math.floor(top * factor) + math.floor(bottom * factor)
-        if w * h <= MAX_BUFFER_PIXELS then low = factor else high = factor end
-    end
-    left, right = math.floor(left * low), math.floor(right * low)
-    top, bottom = math.floor(top * low), math.floor(bottom * low)
-    debug_print("[LongShadowN] expansion clamped: expanded buffer area budget")
 end
 local source_offset_x, source_offset_y = left, top
 local texture_mapping_width = source_w + texture_left + texture_right

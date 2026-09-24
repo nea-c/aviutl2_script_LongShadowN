@@ -518,6 +518,16 @@ test("2D texture mapping ignores the extra Blur Shadow padding", () => {
   assert.match(source, /texture_mapping_width/);
 });
 
+test("expanded shadow padding is not cut off by a script buffer limit", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const start = source.indexOf("local source_w, source_h = obj.w, obj.h");
+  const end = source.indexOf("local has_texture, texture_w, texture_h = load_shadow_texture");
+  assert.ok(start >= 0 && end > start, "shadow expansion block was not found");
+  const expansion = source.slice(start, end);
+  assert.doesNotMatch(expansion, /MAX_BUFFER_PIXELS|clamp_padding|image_max|expansion clamped/);
+  assert.match(source, /obj\.effect\("領域拡張", "上", top, "下", bottom, "左", left, "右", right/);
+});
+
 test("blur sampling keeps at most 3.125 px spacing throughout the upper range", () => {
   const source = readFileSync(scriptPath, "utf8");
   const blurHalfSamples = extractFunction(source, "blur_half_samples", "int");
