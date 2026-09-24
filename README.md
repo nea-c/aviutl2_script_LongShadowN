@@ -8,13 +8,17 @@
 
 ## 最新 / Latest
 
-**r13**
+**r14**
 
 ## 大きい影で描画されない場合
 
-`Length` や `Softness` を大きくしたとき、または `2D Texture` を使ったときに `invalid buffer type` が出る場合は、AviUtl2 の一時画像キャッシュが不足している可能性があります。`system.conf` の `[Config]` にある `TemporaryImageCacheSize` を増やし、AviUtl2 を再起動してください。極端に大きい影は、設定を増やしても描画できない場合があります。
+`invalid buffer type` が出る場合は、AviUtl2 の一時画像キャッシュが不足している可能性があります。  
+`system.conf` の `[Config]` にある `TemporaryImageCacheSize` を増やし、AviUtl2 を再起動してください。極端に大きい影は、設定を増やしても描画できない場合があります。
 
 ## 変更履歴 / Change log
+
+- r14
+  - Softnessのかかり方を調整
 
 - r13
   - パラメータの名称を整えた
