@@ -2,7 +2,7 @@
 --label:加工
 --information:LongShadowN r1
 
---select@shadow_type:ShadowType=0,Directional=0,Radial=1,Inverse Radial=2
+--select@shadow_type:Shadow Type=0,Directional=0,Radial=1,Inverse Radial=2
 --select@quality:Quality=1,Draft=0,Standard=1,High=2,Ultra=3
 --select@output_quality:Output Quality=2,Draft=0,Standard=1,High=2,Ultra=3
 
