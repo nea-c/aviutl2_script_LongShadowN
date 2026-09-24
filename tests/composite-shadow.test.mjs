@@ -734,6 +734,29 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
   }
 });
 
+test("faded rays stop when the remaining tip cannot raise coverage", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  for (const name of ["direct_raymarch_shadow", "edge_antialias"]) {
+    const shader = source.match(
+      new RegExp(`--\\[\\[pixelshader@${name}:([\\s\\S]*?)\\]\\]`),
+    )?.[1];
+    assert.ok(shader, `${name} shader was not found`);
+    const done = extractFunction(shader, "faded_ray_done", "bool");
+    assert.match(shader, /if \(faded_ray_done\(coverage, distance\)\) break;/);
+    const assembly = compileConstantResult(`
+static const float fade_out = 0.5;
+${done}
+float4 testmain(float4 pos : SV_Position) : SV_Target {
+    bool correct = faded_ray_done(0.6, 0.75)
+        && !faded_ray_done(0.4, 0.75)
+        && !faded_ray_done(0.6, 0.25)
+        && faded_ray_done(1, 0.25);
+    return correct ? float4(0,1,0,1) : float4(1,0,0,1);
+}`);
+    assert.match(assembly, /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/);
+  }
+});
+
 test("layered Direct samples retain ordered intervals and raw coverage", () => {
   const source = readFileSync(scriptPath, "utf8");
   const shader = source.match(/--\[\[pixelshader@direct_raymarch_shadow:([\s\S]*?)\]\]/)?.[1];
@@ -799,18 +822,55 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
   assert.match(assembly, /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/);
 });
 
-test("Directional blur routes 2D texture through integrated blur and other styles through layers", () => {
+test("untextured Directional blur uses reduced source buffers while 2D keeps full resolution", () => {
   const source = readFileSync(scriptPath, "utf8");
+  const preblur = source.match(/local function prepare_integrated_source_blur\([\s\S]*?\r?\nend/)?.[0];
+  assert.ok(preblur, "integrated source blur was not found");
+  assert.match(preblur, /while radius \/ downsample > 10 and downsample < 16 do/);
+  assert.match(preblur, /obj\.clearbuffer\("cache:longshadown_source_blur_work", blur_w, blur_h\)/);
+  assert.match(preblur, /\{ blur_w, blur_h, 1, 0, radius \* blur_w \/ obj\.w \}/);
+  assert.match(preblur, /\{ blur_w, blur_h, 0, 1, radius \* blur_h \/ obj\.h \}/);
   const renderBlock = source.slice(source.lastIndexOf("if should_render_shadow then"),
     source.indexOf("local object_red", source.lastIndexOf("if should_render_shadow then")));
   assert.match(renderBlock, /shadow_type == 0 and blur_shadow > 0/);
-  assert.match(renderBlock, /texture_type == 2 and has_texture ~= 0[\s\S]*?prepare_integrated_source_blur\(\)/);
-  assert.match(renderBlock, /apply_integrated_blurred_2d_texture\(\)/);
+  assert.match(renderBlock, /local integrated_texture = texture_type == 2 and has_texture ~= 0/);
+  assert.match(renderBlock, /integrated_texture or has_texture == 0 or texture_type == 1/);
+  assert.match(renderBlock, /prepare_integrated_source_blur\(not integrated_texture\)/);
+  assert.match(renderBlock, /if integrated_texture then\s+apply_integrated_blurred_2d_texture\(\)/);
   assert.match(renderBlock, /for layer = 0, 1 do/);
   assert.match(renderBlock, /combine_shadow_layers/);
   assert.match(renderBlock, /local selector = shadow_type == 0 and blur_shadow > 0 and -2 or -1/);
   assert.match(source, /"layer_front"/);
   assert.match(renderBlock, /else[\s\S]*obj\.clearbuffer\("cache:longshadown_final", obj\.w, obj\.h\)/);
+});
+
+test("large scratch buffers are released before later shadow passes", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const preblur = source.match(/local function prepare_integrated_source_blur\([\s\S]*?\r?\nend/)?.[0];
+  assert.ok(preblur);
+  for (const name of ["expanded_source", "source_blur_work"]) {
+    assert.match(preblur, new RegExp(`obj\\.clearbuffer\\("cache:longshadown_${name}", 1, 1\\)`));
+  }
+  const release = source.match(/local function release_integrated_source_blur\(\)([\s\S]*?)\r?\nend/)?.[1];
+  assert.ok(release, "integrated source blur cleanup was not found");
+  for (const name of ["source_blur_1", "source_blur_2", "source_blur_3"]) {
+    assert.match(release, new RegExp(`obj\\.clearbuffer\\("cache:longshadown_${name}"`));
+  }
+  const renderBlock = source.slice(source.lastIndexOf("if should_render_shadow then"),
+    source.indexOf("local object_red", source.lastIndexOf("if should_render_shadow then")));
+  assert.match(renderBlock, /render_direct_shadow\([\s\S]*?release_integrated_source_blur\(\)[\s\S]*?style_and_filter_shadow\(/);
+  assert.match(renderBlock,
+    /obj\.clearbuffer\("cache:longshadown_filtered", obj\.w, obj\.h\)\s+obj\.pixelshader\("combine_shadow_layers"/);
+  const style = source.match(/local function style_and_filter_shadow\([\s\S]*?\r?\nend/)?.[0];
+  assert.ok(style);
+  assert.match(style, /obj\.clearbuffer\("cache:longshadown_shadow_a", 1, 1\)/);
+  assert.match(style, /obj\.clearbuffer\("cache:longshadown_source_color", 1, 1\)/);
+  const texture = source.match(/local function apply_integrated_blurred_2d_texture\([\s\S]*?\r?\nend/)?.[0];
+  assert.ok(texture);
+  for (const name of ["blur_distance_a", "blur_distance_b", "texture_field",
+    "texture_blur_a", "texture_blur_b"]) {
+    assert.match(texture, new RegExp(`obj\\.clearbuffer\\("cache:longshadown_${name}", 1, 1\\)`));
+  }
 });
 
 test("Fade sample switches keep blur distance continuous near the shadow root", () => {

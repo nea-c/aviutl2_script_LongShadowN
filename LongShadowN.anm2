@@ -161,6 +161,11 @@ bool accumulate_faded_shadow_sample(float sample_alpha, float root_alpha,
     coverage = combined;
     return true;
 }
+bool faded_ray_done(float coverage, float distance) {
+    if (coverage >= 0.9999) return true;
+    return fade_out > 0.0001
+        && coverage >= smoothstep(0, fade_out, 1 - distance);
+}
 struct LayeredSampleState {
     float front_coverage, front_distance;
     float rear_coverage, rear_distance;
@@ -323,6 +328,7 @@ float4 direct_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
     int active_samples = min(8001,
         max(2, (int)ceil(source_span / quality_step) + 1));
     float root_alpha = sample_source_alpha_direct(pixel);
+    if (layer_selector < -0.5 && 1 - root_alpha <= 1e-6) return 0;
     float coverage = 0;
     float weighted_distance = 0;
     float2 selected_source_coordinate = 0;
@@ -364,7 +370,7 @@ float4 direct_raymarch_shadow(float4 pos : SV_Position) : SV_Target {
                     coverage, weighted_distance)) {
                 selected_source_coordinate = source_coordinate;
             }
-            if (coverage >= 0.9999) break;
+            if (faded_ray_done(coverage, distance)) break;
         } else {
             accumulate_layered_sample(sample_alpha, root_alpha, distance,
                 fade_weight_sample(distance), source_coordinate, layer_state);
@@ -452,6 +458,11 @@ bool accumulate_faded_shadow_sample(float sample_alpha, float root_alpha,
     weighted_distance += distance * (combined - coverage);
     coverage = combined;
     return true;
+}
+bool faded_ray_done(float coverage, float distance) {
+    if (coverage >= 0.9999) return true;
+    return fade_out > 0.0001
+        && coverage >= smoothstep(0, fade_out, 1 - distance);
 }
 bool clip_parameter_axis(float origin, float delta, float bounds_min,
     float bounds_max, inout float interval_min, inout float interval_max) {
@@ -634,6 +645,7 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
         if (i >= refine_samples) break;
         float2 pixel = pos.xy + refine_offset(i);
         float root_alpha = sample_source_alpha(pixel);
+        if (layer_selector < -0.5 && 1 - root_alpha <= 1e-6) continue;
         float coverage = 0;
         float weighted_distance = 0;
         bool found_shadow = false;
@@ -689,7 +701,7 @@ float4 edge_antialias(float4 pos : SV_Position) : SV_Target {
                         distance, coverage, weighted_distance)) {
                     found_shadow = true;
                 }
-                if (coverage >= 0.9999) break;
+                if (faded_ray_done(coverage, distance)) break;
             } else {
                 accumulate_layered_sample(sample_alpha, root_alpha, distance,
                     fade_weight_sample(distance), 0, layer_state);
@@ -1080,19 +1092,6 @@ float4 style_2d_texture_field(float4 pos : SV_Position) : SV_Target {
     else if (texture_edge_extension > 0.5) uv = saturate(uv);
     else if (any(uv < 0) || any(uv > 1)) return 0;
     return texture_texture.SampleLevel(texture_sampler, uv, 0);
-}
-]]
-
---[[pixelshader@combine_shadow_distance:
-Texture2D front_texture : register(t0);
-Texture2D rear_texture : register(t1);
-float4 combine_shadow_distance(float4 pos : SV_Position) : SV_Target {
-    float4 front = front_texture[int2(pos.xy)];
-    float4 rear = rear_texture[int2(pos.xy)];
-    float visible_rear = 1 - saturate(front.a);
-    float coverage = front.a + rear.a * visible_rear;
-    float weighted_distance = front.g + rear.g * visible_rear;
-    return float4(0, weighted_distance, 0, coverage);
 }
 ]]
 
@@ -1940,7 +1939,9 @@ local function style_and_filter_shadow(buffer_w, buffer_h,
         { "cache:longshadown_resolved", "cache:longshadown_source" },
         edge_params, "copy", "clamp")
     obj.copybuffer("cache:longshadown_resolved", "cache:longshadown_shadow_b")
+    obj.clearbuffer("cache:longshadown_shadow_b", 1, 1)
     end
+    obj.clearbuffer("cache:longshadown_shadow_a", 1, 1)
     obj.clearbuffer("cache:longshadown_final", buffer_w, buffer_h)
     -- Clamp preserves the 1D endpoints; wrapped UVs and the loop sampler give
     -- repeating textures continuous interpolation across their seam.
@@ -1971,6 +1972,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h,
               texture_mapping_width, texture_mapping_height,
               layer_selector > 1.5 and 1 or 0 }, "copy", "clamp")
     end
+    obj.clearbuffer("cache:longshadown_source_color", 1, 1)
     if blur_shadow > 0 and layer_selector < 1.5 then
         obj.clearbuffer("cache:longshadown_blur_distance_a", buffer_w, buffer_h)
         obj.pixelshader("spread_blur_distance", "cache:longshadown_blur_distance_a",
@@ -1980,6 +1982,7 @@ local function style_and_filter_shadow(buffer_w, buffer_h,
         obj.pixelshader("spread_blur_distance", "cache:longshadown_blur_distance_b",
             "cache:longshadown_blur_distance_a",
             { buffer_w, buffer_h, 0, 1, blur_shadow }, "copy", "clip")
+        obj.clearbuffer("cache:longshadown_blur_distance_a", 1, 1)
         obj.clearbuffer("cache:longshadown_filtered", buffer_w, buffer_h)
         obj.pixelshader("blur_shadow", "cache:longshadown_filtered",
             { "cache:longshadown_final", "cache:longshadown_blur_distance_b" },
@@ -1987,6 +1990,8 @@ local function style_and_filter_shadow(buffer_w, buffer_h,
         obj.pixelshader("blur_shadow", "cache:longshadown_final",
             { "cache:longshadown_filtered", "cache:longshadown_blur_distance_b" },
             { buffer_w, buffer_h, 0, 1, blur_shadow }, "copy", "clip")
+        obj.clearbuffer("cache:longshadown_blur_distance_b", 1, 1)
+        obj.clearbuffer("cache:longshadown_filtered", 1, 1)
     end
 end
 
@@ -2010,6 +2015,8 @@ local function apply_integrated_blurred_2d_texture()
         "cache:longshadown_blur_distance_b",
         "cache:longshadown_blur_distance_a",
         { obj.w, obj.h, 0, 1, blur_shadow }, "copy", "clip")
+    obj.clearbuffer("cache:longshadown_blur_distance_a", 1, 1)
+    obj.clearbuffer("cache:longshadown_resolved", 1, 1)
     obj.clearbuffer("cache:longshadown_texture_field", obj.w, obj.h)
     obj.pixelshader("style_2d_texture_field",
         "cache:longshadown_texture_field",
@@ -2021,56 +2028,84 @@ local function apply_integrated_blurred_2d_texture()
           texture_2d_scale_x, texture_2d_scale_y,
           texture_mapping, texture_repeat and 1 or 0, 1 },
         "copy", texture_repeat and "loop" or "clamp")
+    obj.clearbuffer("cache:longshadown_texture", 1, 1)
     obj.clearbuffer("cache:longshadown_texture_blur_a", obj.w, obj.h)
     obj.pixelshader("blur_shadow",
         "cache:longshadown_texture_blur_a",
         { "cache:longshadown_texture_field",
           "cache:longshadown_blur_distance_b" },
         { obj.w, obj.h, 1, 0, blur_shadow }, "copy", "clip")
+    obj.clearbuffer("cache:longshadown_texture_field", 1, 1)
     obj.clearbuffer("cache:longshadown_texture_blur_b", obj.w, obj.h)
     obj.pixelshader("blur_shadow",
         "cache:longshadown_texture_blur_b",
         { "cache:longshadown_texture_blur_a",
           "cache:longshadown_blur_distance_b" },
         { obj.w, obj.h, 0, 1, blur_shadow }, "copy", "clip")
+    obj.clearbuffer("cache:longshadown_texture_blur_a", 1, 1)
+    obj.clearbuffer("cache:longshadown_blur_distance_b", 1, 1)
     obj.clearbuffer("cache:longshadown_filtered", obj.w, obj.h)
     obj.pixelshader("apply_blurred_texture",
         "cache:longshadown_filtered",
         { "cache:longshadown_final",
           "cache:longshadown_texture_blur_b" },
         { texture_color_mix / 100 }, "copy", "clamp")
+    obj.clearbuffer("cache:longshadown_texture_blur_b", 1, 1)
     obj.copybuffer("cache:longshadown_final", "cache:longshadown_filtered")
+    obj.clearbuffer("cache:longshadown_filtered", 1, 1)
 end
 
-local function prepare_integrated_source_blur()
+local function prepare_integrated_source_blur(fast)
     obj.copybuffer("cache:longshadown_expanded_source", "object")
     for level = 1, 3 do
         local radius = blur_shadow < 1 and blur_shadow
             or blur_shadow ^ (level / 3)
         local destination = "cache:longshadown_source_blur_" .. level
-        obj.clearbuffer("cache:longshadown_source_blur_work", obj.w, obj.h)
+        local downsample = 1
+        if fast then
+            while radius / downsample > 10 and downsample < 16 do
+                downsample = downsample * 2
+            end
+        end
+        local blur_w = math.max(1, math.ceil(obj.w / downsample))
+        local blur_h = math.max(1, math.ceil(obj.h / downsample))
+        obj.clearbuffer("cache:longshadown_source_blur_work", blur_w, blur_h)
         obj.pixelshader("fixed_source_blur",
             "cache:longshadown_source_blur_work",
             "cache:longshadown_expanded_source",
-            { obj.w, obj.h, 1, 0, radius }, "copy", "clamp")
-        obj.clearbuffer(destination, obj.w, obj.h)
+            { blur_w, blur_h, 1, 0, radius * blur_w / obj.w }, "copy", "clamp")
+        obj.clearbuffer(destination, blur_w, blur_h)
         obj.pixelshader("fixed_source_blur", destination,
             "cache:longshadown_source_blur_work",
-            { obj.w, obj.h, 0, 1, radius }, "copy", "clamp")
+            { blur_w, blur_h, 0, 1, radius * blur_h / obj.h }, "copy", "clamp")
     end
+    obj.clearbuffer("cache:longshadown_expanded_source", 1, 1)
+    obj.clearbuffer("cache:longshadown_source_blur_work", 1, 1)
+end
+
+local function release_integrated_source_blur()
+    obj.clearbuffer("cache:longshadown_source_blur_1", 1, 1)
+    obj.clearbuffer("cache:longshadown_source_blur_2", 1, 1)
+    obj.clearbuffer("cache:longshadown_source_blur_3", 1, 1)
 end
 
 if should_render_shadow then
     local _, refine_samples = get_quality_config(effective_quality)
+    local integrated_texture = texture_type == 2 and has_texture ~= 0
     if shadow_type == 0 and blur_shadow > 0
-        and texture_type == 2 and has_texture ~= 0 then
-        prepare_integrated_source_blur()
+        and (integrated_texture or has_texture == 0 or texture_type == 1) then
+        prepare_integrated_source_blur(not integrated_texture)
         local target_scale, count, step = render_direct_shadow(
             obj.w, obj.h, source_pos_x, source_pos_y, 2)
+        release_integrated_source_blur()
         style_and_filter_shadow(obj.w, obj.h,
             target_scale, count, refine_samples, step,
             shadow_opacity / 100, 2)
-        apply_integrated_blurred_2d_texture()
+        if integrated_texture then
+            apply_integrated_blurred_2d_texture()
+        else
+            obj.clearbuffer("cache:longshadown_resolved", 1, 1)
+        end
     elseif shadow_type == 0 and blur_shadow > 0 then
         for layer = 0, 1 do
             local target_scale, count, step = render_direct_shadow(
@@ -2079,61 +2114,16 @@ if should_render_shadow then
                 target_scale, count, refine_samples, step, 1, layer)
             if layer == 0 then
                 obj.copybuffer("cache:longshadown_layer_front", "cache:longshadown_final")
-                obj.copybuffer("cache:longshadown_layer_distance_front",
-                    "cache:longshadown_resolved")
             end
         end
+        obj.clearbuffer("cache:longshadown_filtered", obj.w, obj.h)
         obj.pixelshader("combine_shadow_layers", "cache:longshadown_filtered",
             { "cache:longshadown_layer_front", "cache:longshadown_final" },
             { shadow_opacity / 100 }, "copy", "clamp")
         obj.copybuffer("cache:longshadown_final", "cache:longshadown_filtered")
-        if texture_type == 2 and has_texture ~= 0 then
-            obj.clearbuffer("cache:longshadown_texture_distance", obj.w, obj.h)
-            obj.pixelshader("combine_shadow_distance",
-                "cache:longshadown_texture_distance",
-                { "cache:longshadown_layer_distance_front",
-                  "cache:longshadown_resolved" }, {}, "copy", "clamp")
-            obj.clearbuffer("cache:longshadown_blur_distance_a", obj.w, obj.h)
-            obj.pixelshader("spread_blur_distance",
-                "cache:longshadown_blur_distance_a",
-                "cache:longshadown_texture_distance",
-                { obj.w, obj.h, 1, 0, blur_shadow }, "copy", "clip")
-            obj.clearbuffer("cache:longshadown_blur_distance_b", obj.w, obj.h)
-            obj.pixelshader("spread_blur_distance",
-                "cache:longshadown_blur_distance_b",
-                "cache:longshadown_blur_distance_a",
-                { obj.w, obj.h, 0, 1, blur_shadow }, "copy", "clip")
-            obj.clearbuffer("cache:longshadown_texture_field", obj.w, obj.h)
-            obj.pixelshader("style_2d_texture_field",
-                "cache:longshadown_texture_field",
-                "cache:longshadown_texture",
-                { obj.w, obj.h, texture_x, texture_y,
-                  texture_w, texture_h,
-                  texture_mapping_center_x, texture_mapping_center_y,
-                  texture_mapping_width, texture_mapping_height,
-                  texture_2d_scale_x, texture_2d_scale_y,
-                  texture_mapping, texture_repeat and 1 or 0, 0 },
-                "copy", texture_repeat and "loop" or "clamp")
-            obj.clearbuffer("cache:longshadown_texture_blur_a", obj.w, obj.h)
-            obj.pixelshader("blur_shadow",
-                "cache:longshadown_texture_blur_a",
-                { "cache:longshadown_texture_field",
-                  "cache:longshadown_blur_distance_b" },
-                { obj.w, obj.h, 1, 0, blur_shadow }, "copy", "clip")
-            obj.clearbuffer("cache:longshadown_texture_blur_b", obj.w, obj.h)
-            obj.pixelshader("blur_shadow",
-                "cache:longshadown_texture_blur_b",
-                { "cache:longshadown_texture_blur_a",
-                  "cache:longshadown_blur_distance_b" },
-                { obj.w, obj.h, 0, 1, blur_shadow }, "copy", "clip")
-            obj.pixelshader("apply_blurred_texture",
-                "cache:longshadown_filtered",
-                { "cache:longshadown_final",
-                  "cache:longshadown_texture_blur_b" },
-                { texture_color_mix / 100 }, "copy", "clamp")
-            obj.copybuffer("cache:longshadown_final",
-                "cache:longshadown_filtered")
-        end
+        obj.clearbuffer("cache:longshadown_layer_front", 1, 1)
+        obj.clearbuffer("cache:longshadown_resolved", 1, 1)
+        obj.clearbuffer("cache:longshadown_filtered", 1, 1)
     else
         local selector = shadow_type == 0 and blur_shadow > 0 and -2 or -1
         local target_scale, count, step = render_direct_shadow(
@@ -2141,6 +2131,7 @@ if should_render_shadow then
         style_and_filter_shadow(obj.w, obj.h,
             target_scale, count, refine_samples, step,
             shadow_opacity / 100, selector)
+        obj.clearbuffer("cache:longshadown_resolved", 1, 1)
     end
 else
     -- Both caches are current-frame transparency, never previous-frame results.
@@ -2157,3 +2148,6 @@ obj.pixelshader("composite_shadow", "object",
     { "cache:longshadown_final", "cache:longshadown_source" },
     { source_offset_x, source_offset_y, source_w, source_h,
       object_red, object_green, object_blue, object_mix / 100, object_opacity / 100 }, "copy")
+obj.clearbuffer("cache:longshadown_final", 1, 1)
+obj.clearbuffer("cache:longshadown_source", 1, 1)
+obj.clearbuffer("cache:longshadown_texture", 1, 1)
