@@ -10,15 +10,24 @@
 
 **r14**
 
+## 後続効果について
+
+`Following Effects` → `Apply To` で、LongShadowN の後に置いた効果の適用先を選べます。  
+初期値の `Whole` は影と元オブジェクトの全体に適用します。  
+`Shadow Only` は影だけに適用し、その後で元オブジェクトを描画します。
+
 ## 大きい影で描画されない場合
 
 `invalid buffer type` が出る場合は、AviUtl2 の一時画像キャッシュが不足している可能性があります。  
-`system.conf` の `[Config]` にある `TemporaryImageCacheSize` を増やし、AviUtl2 を再起動してください。極端に大きい影は、設定を増やしても描画できない場合があります。
+`system.conf` の `[Config]` にある `TemporaryImageCacheSize` を増やし、AviUtl2 を再起動してください。  
+極端に大きい影は、設定を増やしても描画できない場合があります。
 
 ## 変更履歴 / Change log
 
 - r14
   - Softnessのかかり方を調整
+    - Texture1DやLengthが長いときに歪になることがあります
+  - 後続効果の適用先を `Whole` / `Shadow Only` から選べるように
 
 - r13
   - パラメータの名称を整えた
@@ -29,6 +38,7 @@
 - r11
   - 問題がありすぎたので`Blur Shadow`パラメータを削除
   - Directional時限定で`Softness`パラメータを追加
+    - Texture1DやLengthが長いときに歪になることがあります
   - TextureグループのOpacityを削除(存在価値が不明)
   - FadeInの数値適応のしかたを反転(0でなし)
   - r8の方式変更により必要なくなったため`Post Smooth`チェックボックスを削除

@@ -1371,3 +1371,33 @@ float4 testmain(float4 pos : SV_Position) : SV_Target {
     /mov o0\.xyzw, l\(0(?:\.0+)?,\s*1(?:\.0+)?,\s*0(?:\.0+)?,\s*1(?:\.0+)?\)/,
     "Object Mix normalized a partial edge or recolored the background shadow");
 });
+
+test("subsequent effects receive shadow before the original object is drawn", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const output = source.slice(source.lastIndexOf("local object_red"));
+  assert.match(output,
+    /obj\.pixelshader\("composite_shadow", "object",[\s\S]*?object_opacity \/ 100, 0 \}, "copy"\)[\s\S]*?obj\.effect\(\)[\s\S]*?obj\.draw\(\)[\s\S]*?obj\.copybuffer\("object", "cache:longshadown_source"\)[\s\S]*?obj\.pixelshader\("composite_shadow", "object",[\s\S]*?object_opacity \/ 100, 1 \}, "copy"\)[\s\S]*?obj\.draw\(\)/,
+    "the source must be restored and drawn after the downstream effects");
+});
+
+test("shadow and source passes stay separate at antialiased edges", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  const shader = source.match(
+    /--\[\[pixelshader@composite_shadow:([\s\S]*?)\]\]/)?.[1];
+  assert.ok(shader);
+  assert.match(shader, /if \(output_mode < 0\.5\)/);
+  assert.match(shader, /return shadow \* \(1 - source\.a\);/);
+  assert.match(shader, /return source;/);
+});
+
+test("Following Effects defaults to Whole and keeps ordinary downstream processing", () => {
+  const source = readFileSync(scriptPath, "utf8");
+  assert.match(source,
+    /--group:Following Effects,false\s+--select@post_effect_target:Apply To=0,Whole=0,Shadow Only=1\s+--group/);
+  const output = source.slice(source.lastIndexOf("local object_red"));
+  const whole = output.match(/if post_effect_target == 0 then([\s\S]*?)\r?\nelse/)?.[1];
+  assert.ok(whole, "Whole mode is missing");
+  assert.match(whole, /obj\.pixelshader\("composite_shadow", "object",/);
+  assert.match(whole, /object_opacity \/ 100, 2 \}, "copy"\)/);
+  assert.doesNotMatch(whole, /obj\.effect\(\)|obj\.draw\(\)/);
+});

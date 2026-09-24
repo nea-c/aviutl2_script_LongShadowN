@@ -1,6 +1,6 @@
 --require:2011000
 --label:加工
---information:LongShadowN r13
+--information:LongShadowN r14
 
 --select@shadow_type:Type=0,Directional=0,Radial=1,Inverse Radial=2
 --select@quality:Quality=1,Draft=0,Standard=1,High=2,Ultra=3
@@ -69,6 +69,10 @@
 --hide@texture_2d_scale_y:texture_2d_scale_link==1
 --hide@texture_repeat:texture_type==0
 --hide@texture_color_mix:texture_type==0
+--group
+
+--group:Following Effects,false
+--select@post_effect_target:Apply To=0,Whole=0,Shadow Only=1
 --group
 
 --[[pixelshader@direct_raymarch_shadow:
@@ -1257,6 +1261,7 @@ cbuffer constant0 : register(b0) {
     float3 object_rgb;
     float object_mix;
     float object_opacity;
+    float output_mode;
 };
 float4 color_object(float4 source) {
     float3 straight_rgb = source.rgb / max(source.a, 1e-6);
@@ -1280,6 +1285,10 @@ float4 composite_shadow(float4 pos : SV_Position) : SV_Target {
     }
     shadow = prepare_shadow_for_object(shadow, source_sample);
     float4 source = color_object(source_sample);
+    if (output_mode < 0.5)
+        return shadow * (1 - source.a);
+    if (output_mode < 1.5)
+        return source;
     return source + shadow * (1 - source.a);
 }
 ]]
@@ -2115,6 +2124,7 @@ end
 
 -- Preserve the unexpanded source for Direct sampling and final compositing.
 obj.copybuffer("cache:longshadown_source", "object")
+local original_cx, original_cy = obj.cx, obj.cy
 obj.cx = obj.cx - (right - left) / 2
 obj.cy = obj.cy - (bottom - top) / 2
 obj.effect("領域拡張", "上", top, "下", bottom, "左", left, "右", right, "塗りつぶし", 1)
@@ -2313,10 +2323,30 @@ end
 local object_red = math.floor(object_color / 65536) % 256 / 255
 local object_green = math.floor(object_color / 256) % 256 / 255
 local object_blue = object_color % 256 / 255
-obj.pixelshader("composite_shadow", "object",
-    { "cache:longshadown_final", "cache:longshadown_source" },
-    { source_offset_x, source_offset_y, source_w, source_h,
-      object_red, object_green, object_blue, object_mix / 100, object_opacity / 100 }, "copy")
+if post_effect_target == 0 then
+    -- Leave the combined image in the object for ordinary downstream effects.
+    obj.pixelshader("composite_shadow", "object",
+        { "cache:longshadown_final", "cache:longshadown_source" },
+        { source_offset_x, source_offset_y, source_w, source_h,
+          object_red, object_green, object_blue, object_mix / 100, object_opacity / 100, 2 }, "copy")
+else
+    obj.pixelshader("composite_shadow", "object",
+        { "cache:longshadown_final", "cache:longshadown_source" },
+        { source_offset_x, source_offset_y, source_w, source_h,
+          object_red, object_green, object_blue, object_mix / 100, object_opacity / 100, 0 }, "copy")
+    -- Finish the remaining effects with the shadow as their only input.
+    obj.effect()
+    obj.draw()
+
+    -- Draw the unmodified source above the processed shadow.
+    obj.copybuffer("object", "cache:longshadown_source")
+    obj.cx, obj.cy = original_cx, original_cy
+    obj.pixelshader("composite_shadow", "object",
+        { "cache:longshadown_final", "cache:longshadown_source" },
+        { 0, 0, source_w, source_h,
+          object_red, object_green, object_blue, object_mix / 100, object_opacity / 100, 1 }, "copy")
+    obj.draw()
+end
 obj.clearbuffer("cache:longshadown_final", 1, 1)
 obj.clearbuffer("cache:longshadown_source", 1, 1)
 obj.clearbuffer("cache:longshadown_texture", 1, 1)
