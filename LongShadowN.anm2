@@ -2,7 +2,7 @@
 --label:加工
 --information:LongShadowN r1
 
---select@shadow_type:Shadow Type=0,Directional=0,Radial=1,Inverse Radial=2
+--select@shadow_type:Type=0,Directional=0,Radial=1,Inverse Radial=2
 --select@quality:Quality=1,Draft=0,Standard=1,High=2,Ultra=3
 --select@output_quality:Output Quality=2,Draft=0,Standard=1,High=2,Ultra=3
 
@@ -14,7 +14,7 @@
 --hide@directional_length:shadow_type>0
 --hide@blur_shadow:shadow_type>0
 
---select@source_type:Source Type=0,Anchor=0,Layer=1
+--select@source_type:Source=0,Anchor=0,Layer=1
 --track@source_x:X,-100000,100000,0,0.01
 --track@source_y:Y,-100000,100000,0,0.01
 --track@source_layer:Layer,1,1000,1,1
@@ -47,7 +47,7 @@
 --group
 
 --group:Texture,false
---select@texture_type:Texture::Type=0,None=0,1D=1,2D=2
+--select@texture_type:Texture::Mode=0,None=0,1D=1,2D=2
 --track@texture_layer:Texture::Layer,1,1000,1,1
 --track@texture_x:Texture::Offset X,-100000,100000,0,0.01
 --track@texture_y:Texture::Offset Y,-100000,100000,0,0.01
