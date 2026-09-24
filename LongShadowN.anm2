@@ -73,7 +73,6 @@
 
 --group:Post-processing,false
 --select@supersampling:Supersampling=0,None=0,2x=1
---check@post_smooth:Post Smooth,false
 --group
 
 --[[pixelshader@direct_raymarch_shadow:
@@ -973,35 +972,6 @@ float4 resolve_layered_r9(float4 pos : SV_Position) : SV_Target {
 }
 ]]
 
---[[pixelshader@smooth_shadow:
-Texture2D styled_texture : register(t0);
-Texture2D shadow_texture : register(t1);
-SamplerState linear_sampler : register(s0);
-cbuffer constant0 : register(b0) {
-    float2 buffer_size;
-};
-float4 smooth_shadow(float4 pos : SV_Position) : SV_Target {
-    float4 center = styled_texture[int2(pos.xy)];
-    float center_geometry = shadow_texture[int2(pos.xy)].b;
-    float4 sum = 0;
-    int occupied = 0;
-    [unroll]
-    for (int y = -1; y <= 1; ++y) {
-        [unroll]
-        for (int x = -1; x <= 1; ++x) {
-            float2 uv = (pos.xy + float2(x, y)) / buffer_size;
-            float geometric_coverage = shadow_texture.SampleLevel(linear_sampler, uv, 0).b;
-            occupied += geometric_coverage >= 0.5 ? 1 : 0;
-            sum += styled_texture.SampleLevel(linear_sampler, uv, 0);
-        }
-    }
-    bool isolated_shadow = center_geometry >= 0.5 && occupied <= 2;
-    bool isolated_hole = center_geometry < 0.5 && occupied >= 7;
-    if (!isolated_shadow && !isolated_hole) return center;
-    return sum / 9;
-}
-]]
-
 --[[pixelshader@blur_shadow:
 Texture2D styled_texture : register(t0);
 Texture2D distance_texture : register(t1);
@@ -1059,9 +1029,6 @@ cbuffer constant0 : register(b0) {
 };
 float distance_blur_radius(float distance, float maximum_radius) {
     return maximum_radius * saturate(distance);
-}
-float distance_blur_weight(float offset, float local_radius, float spacing) {
-    return max(0, local_radius + spacing - offset);
 }
 int blur_half_samples(float radius) {
     int original_samples = min(16, max(1, (int)ceil(radius)));
@@ -1457,12 +1424,6 @@ float sample_source_alpha(float2 pixel) {
     if (any(local < 0) || any(local >= source_size)) return 0;
     return saturate(source_texture.SampleLevel(linear_sampler,
         local / source_size, 0).a);
-}
-float reconstruct_extension_coverage(float total_coverage,
-    float root_coverage) {
-    float uncovered_root = 1 - saturate(root_coverage);
-    if (uncovered_root <= 1e-6) return 0;
-    return saturate((total_coverage - root_coverage) / uncovered_root);
 }
 float extension_sample_alpha(float sample_alpha, float sample_travel,
     float quality_step, float current_work_scale) {
@@ -1943,7 +1904,7 @@ if invalid_size then
     debug_print("[LongShadowN] shadow skipped: empty or oversized input", source_w, source_h)
     return
 end
-local texture_margin = (post_smooth and 1 or 0) + 2
+local texture_margin = 2
 local texture_left, texture_top, texture_right, texture_bottom = compute_padding(
     shadow_type, shadow_length, angle, source_pos_x, source_pos_y,
     source_w, source_h, texture_margin)
@@ -2096,13 +2057,6 @@ local function style_and_filter_shadow(buffer_w, buffer_h, work_scale,
               texture_mapping_center_x, texture_mapping_center_y,
               texture_mapping_width, texture_mapping_height,
               layer_selector > 1.5 and 1 or 0 }, "copy", "clamp")
-    end
-    if post_smooth then
-        obj.clearbuffer("cache:longshadown_filtered", buffer_w, buffer_h)
-        obj.pixelshader("smooth_shadow", "cache:longshadown_filtered",
-            { "cache:longshadown_final", "cache:longshadown_resolved" },
-            { buffer_w, buffer_h }, "copy", "clip")
-        obj.copybuffer("cache:longshadown_final", "cache:longshadown_filtered")
     end
     if blur_shadow > 0 and layer_selector < 1.5 then
         obj.clearbuffer("cache:longshadown_blur_distance_a", buffer_w, buffer_h)
